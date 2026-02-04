@@ -1,4 +1,4 @@
-package whily
+package wi
 
 import (
 	"bytes"

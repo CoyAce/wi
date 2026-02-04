@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/CoyAce/whily"
+	"github.com/CoyAce/wi"
 )
 
 var (
@@ -16,6 +16,6 @@ func main() {
 	flag.Parse()
 	fmt.Println("address:", *address)
 	fmt.Println("server mode")
-	s := whily.Server{}
+	s := wi.Server{}
 	log.Fatal(s.ListenAndServe(*address))
 }

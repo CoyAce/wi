@@ -1,4 +1,4 @@
-module github.com/CoyAce/whily
+module github.com/CoyAce/wi
 
 go 1.24.0
 
