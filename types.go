@@ -30,6 +30,8 @@ const (
 	OpAudioCall
 	OpAcceptAudioCall
 	OpEndAudioCall
+	OpPublish
+	OpSubscribe
 )
 
 var wrqSet = map[OpCode]bool{
@@ -41,6 +43,13 @@ var wrqSet = map[OpCode]bool{
 	OpAudioCall:       true,
 	OpAcceptAudioCall: true,
 	OpEndAudioCall:    true,
+	OpPublish:         true,
+}
+
+type ReadReq struct {
+	Code   OpCode
+	FileId uint32
+	UUID   string
 }
 
 type WriteReq struct {

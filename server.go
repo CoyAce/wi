@@ -15,6 +15,7 @@ type Server struct {
 	Retries  uint8         // the number of times to retry a failed transmission
 	Timeout  time.Duration // the duration to wait for an acknowledgement
 	fileMap  map[uint32]WriteReq
+	pushBuf  []WriteReq
 	signLock sync.RWMutex
 	wrqLock  sync.RWMutex
 	audioManager
@@ -83,6 +84,8 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		case OpEndAudioCall:
 			s.deleteAudioReceiver(audioId, wrq.UUID)
 			s.cleanupAudioResource(audioId)
+		case OpPublish:
+			s.pushBuf = append(s.pushBuf, wrq)
 		default:
 			s.addFile(wrq)
 		}

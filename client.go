@@ -353,7 +353,7 @@ func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) e
 
 func (c *Client) MakeAudioCall(fileId uint32) error {
 	c.addAudioStream(WriteReq{Code: OpAudioCall, FileId: fileId, UUID: c.FullID()})
-	return c.sendReq(OpAudioCall, fileId)
+	return c.sendW(c.newAudioReq(OpAudioCall, fileId))
 }
 
 func (c *Client) EndAudioCall(fileId uint32) error {
@@ -361,20 +361,23 @@ func (c *Client) EndAudioCall(fileId uint32) error {
 	c.deleteAudioReceiver(audioId, c.FullID())
 	c.cleanupAudioResource(audioId)
 	c.FileMessages <- WriteReq{Code: OpEndAudioCall, FileId: fileId, UUID: c.FullID()}
-	return c.sendReq(OpEndAudioCall, fileId)
+	return c.sendW(c.newAudioReq(OpEndAudioCall, fileId))
 }
 
 func (c *Client) AcceptAudioCall(fileId uint32) error {
-	return c.sendReq(OpAcceptAudioCall, fileId)
+	return c.sendW(c.newAudioReq(OpAcceptAudioCall, fileId))
 }
 
-func (c *Client) sendReq(code OpCode, fileId uint32) error {
+func (c *Client) newAudioReq(code OpCode, fileId uint32) WriteReq {
+	return WriteReq{Code: code, FileId: fileId, UUID: c.FullID()}
+}
+
+func (c *Client) sendW(wrq WriteReq) error {
 	conn, err := net.Dial("udp", c.ServerAddr)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	wrq := WriteReq{Code: code, FileId: fileId, UUID: c.FullID()}
 	pkt, err := wrq.Marshal()
 	if err != nil {
 		return err
@@ -385,6 +388,10 @@ func (c *Client) sendReq(code OpCode, fileId uint32) error {
 		return err
 	}
 	return nil
+}
+
+func (c *Client) PublishFile(name string, size uint64, id uint32) error {
+	return c.sendW(WriteReq{Code: OpPublish, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
 func (c *Client) SendFile(reader io.Reader, code OpCode,
@@ -591,6 +598,8 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			if cleanup {
 				c.FileMessages <- wrq
 			}
+		case OpPublish:
+			c.FileMessages <- wrq
 		default:
 			c.addFile(wrq)
 		}
