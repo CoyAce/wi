@@ -5,6 +5,7 @@ import (
 	"log"
 	"maps"
 	"net"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -55,11 +56,22 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	var (
 		sign Sign
 		msg  SignedMessage
+		rrq  ReadReq
 		wrq  WriteReq
 		data = Data{}
 		nck  = Nck{}
 	)
 	switch {
+	case msg.Unmarshal(pkt) == nil:
+		go s.handle(msg.Sign, pkt)
+		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
+		s.ack(conn, addr, OpSignedMSG, 0)
+	case data.Unmarshal(pkt) == nil:
+		if s.isAudio(data.FileId) {
+			go s.handleStreamData(conn, data, pkt, addr)
+			return
+		}
+		s.handleFileData(conn, data, pkt, addr, n)
 	case sign.Unmarshal(pkt) == nil:
 		s.signLock.Lock()
 		s.remove(sign)
@@ -67,10 +79,6 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		s.signLock.Unlock()
 		s.ack(conn, addr, OpSign, 0)
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
-	case msg.Unmarshal(pkt) == nil:
-		go s.handle(msg.Sign, pkt)
-		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
-		s.ack(conn, addr, OpSignedMSG, 0)
 	case wrq.Unmarshal(pkt) == nil:
 		go s.handle(s.findSignByUUID(wrq.UUID), pkt)
 		audioId := s.decodeAudioId(wrq.FileId)
@@ -91,25 +99,45 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		}
 		s.wrqLock.Unlock()
 		s.ack(conn, addr, wrq.Code, 0)
-	case data.Unmarshal(pkt) == nil:
-		if s.isAudio(data.FileId) {
-			go s.handleStreamData(conn, data, pkt, addr)
-			return
+	case rrq.Unmarshal(pkt) == nil:
+		switch rrq.Code {
+		case OpSubscribe:
+			s.handleSub(conn, pkt, rrq, sign)
+		default:
 		}
-		s.handleFileData(conn, data, pkt, addr, n)
+		s.ack(conn, addr, rrq.Code, 0)
 	case nck.Unmarshal(pkt) == nil:
 		go s.handleNck(conn, pkt, nck)
 	}
 }
 
+func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq, sign Sign) {
+	i := slices.IndexFunc(s.pushBuf, func(x WriteReq) bool {
+		return x.FileId == rrq.FileId && x.UUID == rrq.Publisher
+	})
+	found := i != -1
+	if found {
+		_, target := s.findTarget(sign.UUID)
+		_, err := conn.WriteTo(pkt, target)
+		if err != nil {
+			log.Printf("Send rrq to [%s} failed: %v", sign.UUID, err)
+		}
+	}
+}
+
 func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
-	target := s.findAddrByUUID(sign.UUID)
-	targetAddr, _ := net.ResolveUDPAddr("udp", target)
-	_, err := conn.WriteTo(pkt, targetAddr)
+	target, addr := s.findTarget(sign.UUID)
+	_, err := conn.WriteTo(pkt, addr)
 	if err != nil {
-		log.Printf("send ack to [%s] failed: %v", target, err)
+		log.Printf("Send ack to [%s] failed: %v", target, err)
 	}
+}
+
+func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
+	target := s.findAddrByUUID(UUID)
+	addr, _ := net.ResolveUDPAddr("udp", target)
+	return target, addr
 }
 
 func (s *Server) remove(sign Sign) {

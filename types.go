@@ -46,10 +46,82 @@ var wrqSet = map[OpCode]bool{
 	OpPublish:         true,
 }
 
+var rrqSet = map[OpCode]bool{
+	OpRRQ:       true,
+	OpSubscribe: true,
+}
+
+type Req interface {
+	Marshal() ([]byte, error)
+}
+
 type ReadReq struct {
-	Code   OpCode
-	FileId uint32
-	UUID   string
+	Code       OpCode
+	FileId     uint32
+	Publisher  string
+	Subscriber string
+}
+
+func (r *ReadReq) Marshal() ([]byte, error) {
+	size := 2 + 4 + len(r.Publisher) + 1 + len(r.Subscriber) + 1
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	if !rrqSet[r.Code] {
+		return nil, errors.New("invalid RRQ")
+	}
+
+	err := binary.Write(b, binary.BigEndian, r.Code) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, r.FileId) // write file id
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, r.Publisher) // write publisher
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, r.Subscriber) // write subscriber
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (r *ReadReq) Unmarshal(p []byte) error {
+	b := bytes.NewBuffer(p)
+
+	err := binary.Read(b, binary.BigEndian, &r.Code) // read operation code
+	if err != nil {
+		return err
+	}
+
+	if !wrqSet[r.Code] {
+		return errors.New("invalid RRQ")
+	}
+
+	err = binary.Read(b, binary.BigEndian, &r.FileId) // read file id
+	if err != nil {
+		return errors.New("invalid RRQ")
+	}
+
+	r.Publisher, err = readString(b)
+	if err != nil {
+		return errors.New("invalid RRQ")
+	}
+
+	r.Subscriber, err = readString(b)
+	if err != nil {
+		return errors.New("invalid RRQ")
+	}
+
+	return nil
 }
 
 type WriteReq struct {
