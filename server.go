@@ -65,7 +65,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	case msg.Unmarshal(pkt) == nil:
 		go s.handle(msg.Sign, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
-		s.ack(conn, addr, OpSignedMSG, 0)
+		s.ack(conn, addr, 0)
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
 			go s.handleStreamData(conn, data, pkt, addr)
@@ -77,7 +77,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		s.remove(sign)
 		s.SignMap[addr.String()] = sign
 		s.signLock.Unlock()
-		s.ack(conn, addr, OpSign, 0)
+		s.ack(conn, addr, 0)
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
 		go s.handle(s.findSignByUUID(wrq.UUID), pkt)
@@ -98,14 +98,14 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			s.addFile(wrq)
 		}
 		s.wrqLock.Unlock()
-		s.ack(conn, addr, wrq.Code, 0)
+		s.ack(conn, addr, 0)
 	case rrq.Unmarshal(pkt) == nil:
 		switch rrq.Code {
 		case OpSubscribe:
 			s.handleSub(conn, pkt, rrq, sign)
 		default:
 		}
-		s.ack(conn, addr, rrq.Code, 0)
+		s.ack(conn, addr, 0)
 	case nck.Unmarshal(pkt) == nil:
 		go s.handleNck(conn, pkt, nck)
 	}
@@ -175,7 +175,7 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	} else {
 		go s.directRelay(conn, sign, pkt)
 	}
-	s.ack(conn, sender, OpData, data.Block)
+	s.ack(conn, sender, data.Block)
 }
 
 func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {
@@ -240,8 +240,8 @@ func (s *Server) findSignByFileId(fileId uint32) Sign {
 	return s.findSignByUUID(wrq.UUID)
 }
 
-func (s *Server) ack(conn net.PacketConn, clientAddr net.Addr, code OpCode, block uint32) {
-	ack := Ack{SrcOp: code, Block: block}
+func (s *Server) ack(conn net.PacketConn, clientAddr net.Addr, block uint32) {
+	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
 	_, err = conn.WriteTo(pkt, clientAddr)
 	if err != nil {

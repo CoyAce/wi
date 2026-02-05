@@ -574,16 +574,14 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
-		if ack.SrcOp == OpSign {
-			c.Connected = true
-		}
+		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
 		s := string(msg.Payload)
 		log.Printf("received text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
-		c.ack(conn, addr, OpSignedMSG, 0)
+		c.ack(conn, addr, 0)
 	case wrq.Unmarshal(buf) == nil:
-		c.ack(conn, addr, wrq.Code, 0)
+		c.ack(conn, addr, 0)
 		audioId := c.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -630,7 +628,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 func (c *Client) handleFileData(conn net.PacketConn, addr net.Addr, data Data, n int) {
 	c.FileData <- data
 	if n < DatagramSize {
-		c.ack(conn, addr, OpData, data.Block)
+		c.ack(conn, addr, data.Block)
 		c.FileId <- data.FileId
 		log.Printf("file id: [%d] received", data.FileId)
 	}
@@ -640,8 +638,8 @@ func (c *Client) addFile(wrq WriteReq) {
 	c.Wrq <- wrq
 }
 
-func (c *Client) ack(conn net.PacketConn, addr net.Addr, code OpCode, block uint32) {
-	ack := Ack{SrcOp: code, Block: block}
+func (c *Client) ack(conn net.PacketConn, addr net.Addr, block uint32) {
+	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
 	_, err = conn.WriteTo(pkt, addr)
 	if err != nil {

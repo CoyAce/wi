@@ -376,22 +376,16 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 }
 
 type Ack struct {
-	SrcOp OpCode
 	Block uint32
 }
 
 func (a *Ack) Marshal() ([]byte, error) {
-	size := 2 + 2 + 4 // operation code + source operation code + block number
+	size := 2 + 4 // operation code  + block number
 
 	b := new(bytes.Buffer)
 	b.Grow(size)
 
 	err := binary.Write(b, binary.BigEndian, uint16(OpAck)) // write operation code
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(b, binary.BigEndian, uint16(a.SrcOp)) // write source operation code
 	if err != nil {
 		return nil, err
 	}
@@ -414,11 +408,6 @@ func (a *Ack) Unmarshal(p []byte) error {
 	}
 
 	if code != OpAck {
-		return errors.New("invalid DATA")
-	}
-
-	err = binary.Read(r, binary.BigEndian, &a.SrcOp) // read source operation code
-	if err != nil {
 		return errors.New("invalid DATA")
 	}
 
