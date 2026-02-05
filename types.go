@@ -102,7 +102,7 @@ func (r *ReadReq) Unmarshal(p []byte) error {
 		return err
 	}
 
-	if !wrqSet[r.Code] {
+	if !rrqSet[r.Code] {
 		return errors.New("invalid RRQ")
 	}
 

@@ -181,9 +181,20 @@ type Client struct {
 type messages struct {
 	SignedMessages chan SignedMessage `json:"-"`
 	FileMessages   chan WriteReq      `json:"-"`
+	SubMessages    chan ReadReq       `json:"-"`
 	MessageCounter uint32
 	Retries        uint8         // the number of times to retry a failed transmission
 	Timeout        time.Duration // the duration to wait for an acknowledgement
+}
+
+func newMessages() messages {
+	return messages{
+		Retries:        3,
+		Timeout:        6 * time.Second,
+		SignedMessages: make(chan SignedMessage, 100),
+		FileMessages:   make(chan WriteReq, 100),
+		SubMessages:    make(chan ReadReq, 100),
+	}
 }
 
 type connManager struct {
@@ -514,16 +525,7 @@ func (c *Client) ListenAndServe(addr string) {
 }
 
 func (c *Client) init() {
-	if c.Retries == 0 {
-		c.Retries = 3
-	}
-
-	if c.Timeout == 0 {
-		c.Timeout = 6 * time.Second
-	}
-
-	c.SignedMessages = make(chan SignedMessage, 100)
-	c.FileMessages = make(chan WriteReq, 100)
+	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
 	c.fileManager = newFileMetaInfo(c.DataDir, c.nck, c.FileMessages)
 	Mkdir(c.getDir(c.FullID()))
@@ -570,16 +572,24 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 		nck  Nck
 		msg  SignedMessage
 		data Data
+		rrq  ReadReq
 		wrq  WriteReq
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
 		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
+		c.ack(conn, addr, 0)
 		s := string(msg.Payload)
 		log.Printf("received text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
+	case rrq.Unmarshal(buf) == nil:
 		c.ack(conn, addr, 0)
+		switch rrq.Code {
+		case OpSubscribe:
+			c.SubMessages <- rrq
+		default:
+		}
 	case wrq.Unmarshal(buf) == nil:
 		c.ack(conn, addr, 0)
 		audioId := c.decodeAudioId(wrq.FileId)

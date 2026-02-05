@@ -102,7 +102,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	case rrq.Unmarshal(pkt) == nil:
 		switch rrq.Code {
 		case OpSubscribe:
-			s.handleSub(conn, pkt, rrq, sign)
+			s.handleSub(conn, pkt, rrq)
 		default:
 		}
 		s.ack(conn, addr, 0)
@@ -111,16 +111,16 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	}
 }
 
-func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq, sign Sign) {
+func (s *Server) handleSub(conn net.PacketConn, pkt []byte, rrq ReadReq) {
 	i := slices.IndexFunc(s.pushBuf, func(x WriteReq) bool {
 		return x.FileId == rrq.FileId && x.UUID == rrq.Publisher
 	})
 	found := i != -1
 	if found {
-		_, target := s.findTarget(sign.UUID)
+		_, target := s.findTarget(rrq.Publisher)
 		_, err := conn.WriteTo(pkt, target)
 		if err != nil {
-			log.Printf("Send rrq to [%s} failed: %v", sign.UUID, err)
+			log.Printf("Send rrq to [%s} failed: %v", rrq.Publisher, err)
 		}
 	}
 }
