@@ -419,7 +419,48 @@ type ErrCode uint16
 const (
 	ErrUnknown ErrCode = iota
 	ErrIllegalOp
+	ErrUnknownUser
 )
+
+func (e *ErrCode) Marshal() ([]byte, error) {
+	size := 2 + 2
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpErr)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, e) // write error code
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (e *ErrCode) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		r    = bytes.NewBuffer(p)
+	)
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return err
+	}
+
+	if code != OpErr {
+		return errors.New("invalid DATA")
+	}
+
+	err = binary.Read(r, binary.BigEndian, &e) // read error code
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 type Nck struct {
 	FileId uint32

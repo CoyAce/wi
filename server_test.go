@@ -3,9 +3,12 @@ package wi
 import (
 	"bytes"
 	"encoding/hex"
+	"math/rand"
 	"net"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestSignMarshal(t *testing.T) {
@@ -50,7 +53,7 @@ func TestListenPacketUDP(t *testing.T) {
 	clientAMsg := SignedMessage{Sign: clientASign, Payload: []byte(textA)}
 	clientAMsgPkt, err := clientAMsg.Marshal()
 
-	serverAddr := setUpServer(t)
+	_, serverAddr := setUpServer(t)
 	client, err := setUpClient(t)
 	defer func() { _ = client.Close() }()
 
@@ -65,6 +68,7 @@ func TestListenPacketUDP(t *testing.T) {
 	}
 
 	// read ack
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err := client.ReadFrom(buf)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +86,7 @@ func TestListenPacketUDP(t *testing.T) {
 	clientA.SendText(textA)
 
 	// client read text. client should receive "beautiful world" from clientA
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err = client.ReadFrom(buf)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +110,7 @@ func TestListenPacketUDP(t *testing.T) {
 }
 
 func TestPubSub(t *testing.T) {
-	serverAddr := setUpServer(t)
+	_, serverAddr := setUpServer(t)
 	pub := newClient(serverAddr, "pub")
 	sub := newClient(serverAddr, "sub")
 	other := newClient(serverAddr, "other")
@@ -131,6 +136,31 @@ func TestPubSub(t *testing.T) {
 	}
 }
 
+func TestUnknownUser(t *testing.T) {
+	server, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	sender := newClient(serverAddr, "sender")
+	server.removeByUUID("sender")
+	err := sender.SendText("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := <-receiver.SignedMessages
+	text := string(msg.Payload)
+	if text != "hello" {
+		t.Errorf("expected \"hello\"; actual %q", text)
+	}
+	err = receiver.SendText("hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg = <-sender.SignedMessages
+	text = string(msg.Payload)
+	if text != "hello" {
+		t.Errorf("expected \"hello\"; actual %q", text)
+	}
+}
+
 func newClient(serverAddr string, UUID string) *Client {
 	client := Client{ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
 	go func() {
@@ -148,11 +178,12 @@ func setUpClient(t *testing.T) (net.PacketConn, error) {
 	return client, err
 }
 
-func setUpServer(t *testing.T) string {
+func setUpServer(t *testing.T) (*Server, string) {
 	s := Server{}
-	serverAddr := "127.0.0.1:52000"
+	port := rand.Intn(40000) + 10000
+	serverAddr := "127.0.0.1:" + strconv.Itoa(port)
 	go func() {
 		t.Error(s.ListenAndServe(serverAddr))
 	}()
-	return serverAddr
+	return &s, serverAddr
 }

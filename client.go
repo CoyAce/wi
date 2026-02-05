@@ -500,16 +500,18 @@ func (c *Client) ListenAndServe(addr string) {
 
 	go c.Loop()
 
-	if c.Status != nil {
-		close(c.Status)
-	}
-
 	c.SAddr, err = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
 		// auto reconnect in case of server down
 		var threshold uint32 = 5
+		once := sync.Once{}
 		for {
 			c.SendSign()
+			once.Do(func() {
+				if c.Status != nil {
+					close(c.Status)
+				}
+			})
 			sentEnoughMessages := c.MessageCounter > threshold
 			if sentEnoughMessages && c.SyncFunc != nil {
 				c.MessageCounter = 0
@@ -572,6 +574,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 		nck  Nck
 		msg  SignedMessage
 		data Data
+		ec   ErrCode
 		rrq  ReadReq
 		wrq  WriteReq
 	)
@@ -631,6 +634,10 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 		packets := cb.Read(nck.ranges)
 		for _, pkt := range packets {
 			_, _ = c.conn.WriteTo(pkt.Data, c.SAddr)
+		}
+	case ec.Unmarshal(buf) == nil:
+		if ec == ErrUnknownUser {
+			c.SendSign()
 		}
 	}
 }
