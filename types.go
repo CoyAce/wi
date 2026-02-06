@@ -480,6 +480,11 @@ func (n *Nck) Marshal() ([]byte, error) {
 	// operation code + fileId  + ranges count + len(ranges) * 4
 	size := 2 + 4 + 1 + len(n.ranges)*4
 	b := new(bytes.Buffer)
+	if size > DatagramSize {
+		m := BlockSize / 4
+		n.ranges = n.ranges[:m]
+		size = DatagramSize
+	}
 	b.Grow(size)
 
 	err := binary.Write(b, binary.BigEndian, uint16(OpNck)) // write operation code
