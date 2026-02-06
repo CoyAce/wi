@@ -90,8 +90,10 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		case OpAcceptAudioCall:
 			s.addAudioReceiver(audioId, wrq)
 		case OpEndAudioCall:
-			s.deleteAudioReceiver(audioId, wrq.UUID)
-			s.cleanupAudioResource(audioId)
+			_, ok := s.deleteAudioReceiver(audioId, wrq.UUID)
+			if ok && s.noReceiverLeft(audioId) {
+				s.cleanup(audioId)
+			}
 		case OpPublish:
 			s.pubMap.Store(FilePair{FileId: wrq.FileId, UUID: wrq.UUID}, &sync.Map{})
 		default:
