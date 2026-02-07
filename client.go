@@ -680,7 +680,7 @@ func (c *Client) sendData(conn net.Conn, data Data) error {
 			return err
 		}
 		cb.Write(Packet{Block: data.Block, Data: pkt})
-		isLastPacket := len(pkt) == DatagramSize
+		isLastPacket := len(pkt) != DatagramSize
 		if isLastPacket {
 			n, err = c.sendPacket(conn, pkt, data.Block)
 		} else {
