@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -335,18 +336,31 @@ func (f *fileReader) isPull(fileId uint32) bool {
 }
 
 type Client struct {
-	UUID       string        // generated 5 digit id
-	Nickname   string        // user typed nickname
-	Sign       string        // chat sign
-	Status     chan struct{} `json:"-"` // initialization status
-	SyncFunc   func()        `json:"-"` // e.t. sync icon
-	ServerAddr string
-	DataDir    string
-	ConfigName string `json:"-"`
+	Status chan struct{} `json:"-"` // initialization status
+	Identity
+	Config
 	messages
 	connManager
 	fileManager
 	*audioManager
+}
+
+type Config struct {
+	ServerAddr  string
+	DataDir     string // save config
+	ExternalDir string // save files, e.t. on Android should be /Android/data/...
+	ConfigName  string `json:"-"`
+	SyncFunc    func() `json:"-"` // e.t. sync icon
+}
+
+type Identity struct {
+	Sign     string // chat sign
+	UUID     string // generated 5 digit id
+	Nickname string // user typed nickname
+}
+
+func (i *Identity) FullID() string {
+	return i.Nickname + i.UUID
 }
 
 type messages struct {
@@ -402,7 +416,7 @@ func (f *fileManager) loadCache(id uint32) *CircularBuffer {
 }
 
 func newFileMetaInfo(
-	dataDir string,
+	externalDir string,
 	nck func(f file),
 	writeOnce func(d Data) error,
 	fileMessages chan<- WriteReq,
@@ -417,7 +431,7 @@ func newFileMetaInfo(
 			wrq:          make(chan WriteReq),
 			fileData:     make(chan Data),
 			fileId:       make(chan uint32),
-			dataDir:      dataDir,
+			dataDir:      externalDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
 			updaters:     make(map[uint32]*updater),
@@ -546,12 +560,12 @@ func (c *Client) SyncGif(gifImg *gif.GIF) error {
 }
 
 func (c *Client) SendVoice(filename string, duration uint64) error {
-	r, err := os.Open(c.getPath(c.FullID(), filename))
+	r, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	return c.SendFile(r, OpSendVoice, filename, 0, duration)
+	return c.SendFile(r, OpSendVoice, filepath.Base(filename), 0, duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
@@ -710,10 +724,6 @@ func (c *Client) SendText(text string) error {
 	return err
 }
 
-func (c *Client) FullID() string {
-	return c.Nickname + c.UUID
-}
-
 func (c *Client) ListenAndServe(addr string) {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -757,8 +767,7 @@ func (c *Client) ListenAndServe(addr string) {
 func (c *Client) init() {
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.DataDir, c.nck, c.writeOnce, c.FileMessages)
-	Mkdir(c.getDir(c.FullID()))
+	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.writeOnce, c.FileMessages)
 }
 
 func (c *Client) SendSign() {

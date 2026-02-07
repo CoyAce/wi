@@ -82,7 +82,11 @@ func TestListenPacketUDP(t *testing.T) {
 	}
 
 	// clientA send text "beautiful world"
-	clientA := Client{ServerAddr: serverAddr, Status: make(chan struct{}), UUID: uuidA, Sign: sign}
+	clientA := Client{
+		Config:   Config{ServerAddr: serverAddr},
+		Status:   make(chan struct{}),
+		Identity: Identity{UUID: uuidA, Sign: sign},
+	}
 	go func() {
 		clientA.ListenAndServe("127.0.0.1:")
 	}()
@@ -238,7 +242,11 @@ func TestSyncMap(t *testing.T) {
 }
 
 func newClient(serverAddr string, UUID string) *Client {
-	client := Client{DataDir: "./test", ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
+	client := Client{
+		Config:   Config{ExternalDir: "./test", ServerAddr: serverAddr},
+		Identity: Identity{UUID: UUID, Sign: "default"},
+		Status:   make(chan struct{}),
+	}
 	go func() {
 		client.ListenAndServe("127.0.0.1:")
 	}()
