@@ -221,6 +221,7 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	isLastPacket := n < DatagramSize
 	sign := s.findSignByFileId(data.FileId)
 	if isLastPacket {
+		s.ack(conn, sender, data.Block)
 		s.handle(sign, pkt)
 		time.AfterFunc(5*time.Minute, func() {
 			s.fileMap.Delete(data.FileId)
@@ -228,7 +229,6 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	} else {
 		s.directRelay(conn, sign, pkt)
 	}
-	s.ack(conn, sender, data.Block)
 }
 
 func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {

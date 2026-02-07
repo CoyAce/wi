@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,12 +17,12 @@ import (
 )
 
 type file struct {
-	req             WriteReq // file id, name and size
-	data            []Data   // file packets
-	packetsReceived int
-	startTime       time.Time
-	updateTime      time.Time
-	rt              *RangeTracker
+	req      WriteReq // file id, name and size
+	data     []Data   // file packets
+	counter  int
+	createAt time.Time
+	updateAt time.Time
+	rt       *RangeTracker
 	*updater
 }
 
@@ -64,7 +63,7 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd := f.files[data.FileId]
 	req := fd.req
 	fd.data = append(fd.data, data)
-	if f.received100kb(fd) {
+	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		fd.updateMetrics()
 		if !f.isPull(data.FileId) {
@@ -77,10 +76,18 @@ func (f *file) updateMetrics() {
 	if f.updater == nil {
 		return
 	}
-	f.packetsReceived++
+	f.counter++
+	f.update()
+	f.reset()
+}
+
+func (f *file) reset() {
+	f.updateAt = time.Now()
+	f.counter = 0
+}
+
+func (f *file) update() {
 	f.updateSpeed(f.getSpeed())
-	f.updateTime = time.Now()
-	f.packetsReceived = 0
 	f.updateProgress(f.rt.GetProgress())
 }
 
@@ -91,11 +98,11 @@ func (f *file) getSpeed() int {
 		speed           float32
 	)
 	if f.rt.isCompleted() {
-		elapsed = time.Since(f.startTime) / time.Millisecond
+		elapsed = time.Since(f.createAt) / time.Millisecond
 		packetsReceived = int(f.rt.nextBlock() - 1)
 	} else {
-		elapsed = time.Since(f.updateTime) / time.Millisecond
-		packetsReceived = f.packetsReceived
+		elapsed = time.Since(f.updateAt) / time.Millisecond
+		packetsReceived = f.counter
 	}
 	speed = float32(packetsReceived*BlockSize) * 1000 / float32(elapsed)
 	return int(speed)
@@ -108,22 +115,20 @@ func (f *fileWriter) tryNck(fd file) {
 	f.nck(fd)
 }
 
-func (f *fileWriter) received100kb(fd *file) bool {
-	return len(fd.data) >= 100*1024/BlockSize
+func (f *fileWriter) received256kb(fd *file) bool {
+	return len(fd.data) >= 256*1024/BlockSize
 }
 
 func (f *fileWriter) init(req WriteReq) {
 	if f.isProcessing(req) {
 		return
 	}
-	// remove before append
-	RemoveFile(f.getPath(req.UUID, req.Filename))
 	f.files[req.FileId] = &file{
-		req:        req,
-		rt:         &RangeTracker{},
-		startTime:  time.Now(),
-		updateTime: time.Now(),
-		updater:    f.updaters[req.FileId],
+		req:      req,
+		rt:       &RangeTracker{},
+		createAt: time.Now(),
+		updateAt: time.Now(),
+		updater:  f.updaters[req.FileId],
 	}
 	if f.isPull(req.FileId) {
 		f.pull(req)
@@ -159,12 +164,8 @@ func (f *fileWriter) getPath(uuid string, filename string) string {
 
 func (f *fileWriter) tryComplete(id uint32) {
 	fd := f.files[id]
-	if fd == nil {
-		return
-	}
 	req := fd.req
-	filePath := f.getPath(req.UUID, req.Filename)
-	f.flush(fd, filePath)
+	f.flush(fd, f.getPath(req.UUID, req.Filename))
 	if fd.rt.isCompleted() {
 		fd.updateMetrics()
 		f.clean(id)
@@ -203,25 +204,24 @@ func (f *fileWriter) isFile(fileId uint32) bool {
 func writeTo(filePath string, data []Data) {
 	// os.O_CREATE: 如果文件不存在，则创建文件
 	// os.O_WRONLY: 以只写模式打开文件
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Printf("error opening file: %v", err)
 	}
-	defer file.Close()
+	defer f.Close()
 
 	readers := make([]io.Reader, 0, len(data))
 	for _, d := range data {
-		//log.Printf("block: %v", d.Block)
 		readers = append(readers, d.Payload)
 	}
 	multiReader := io.MultiReader(readers...)
-	_, err = file.Seek(int64((data[0].Block-1)*BlockSize), 0)
+	_, err = f.Seek(int64((data[0].Block-1)*BlockSize), 0)
 	if err != nil {
-		log.Printf("seeking to block %d failed: %v", data[0].Block, err)
+		log.Printf("Seeking to block %d failed: %v", data[0].Block, err)
 	}
 	// 使用io.Copy将multiReader的内容写入文件
-	if _, err := io.Copy(file, multiReader); err != nil {
-		log.Printf("error writing to file: %v", err)
+	if _, err := io.Copy(f, multiReader); err != nil {
+		log.Printf("Write to file failed: %v", err)
 	}
 }
 
@@ -259,21 +259,40 @@ func (f *fileContent) swap() {
 	f.pending = RangeTracker{}
 }
 
+func (f *fileContent) isProcessing() bool {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	return f.processing
+}
+
+func (f *fileContent) setProcessing() {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.processing = true
+}
+
+func (f *fileContent) unsetProcessing() {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.processing = false
+}
+
 type fileReader struct {
-	req      chan Nck                // packets request
-	contents map[uint32]*fileContent // fileId -> *fileContent
-	send     func(data Data) error   // send one data packet
+	req       chan Nck                // packets request
+	contents  map[uint32]*fileContent // fileId -> *fileContent
+	writeOnce func(data Data) error   // send single data packet
 }
 
 func (f *fileReader) process() {
 	for {
 		select {
 		case n := <-f.req:
-			if f.contents[n.FileId] == nil {
+			c := f.contents[n.FileId]
+			if c == nil {
 				continue
 			}
-			f.contents[n.FileId].add(n.ranges)
-			if !f.isProcessing(n.FileId) {
+			c.add(n.ranges)
+			if !c.isProcessing() {
 				go f.read(n.FileId)
 			}
 		}
@@ -281,41 +300,34 @@ func (f *fileReader) process() {
 }
 
 func (f *fileReader) read(id uint32) {
-	content := f.contents[id]
-	if content == nil || len(content.reading.ranges) == 0 {
-		return
-	}
-	content.processing = true
+	c := f.contents[id]
+	c.setProcessing()
 LOOP:
-	reading := make([]Range, len(content.reading.ranges))
-	copy(reading, content.reading.ranges)
+	reading := make([]Range, len(c.reading.ranges))
+	copy(reading, c.reading.ranges)
 	for _, rg := range reading {
 		for i := rg.start; i <= rg.end; i++ {
 			pos := (i - 1) * BlockSize
-			_, err := content.content.Seek(int64(pos), 0)
+			_, err := c.content.Seek(int64(pos), 0)
 			if err != nil {
 				log.Printf("Seek failed: %v", err)
 			}
-			d := Data{FileId: content.fileId, Block: i - 1, Payload: content.content}
-			err = f.send(d)
+			d := Data{FileId: c.fileId, Block: i - 1, Payload: c.content}
+			err = f.writeOnce(d)
 			if err != nil {
 				log.Printf("Send failed: %v", err)
 			}
 			if i%50 == 0 {
-				content.remove(Range{rg.start, i})
+				c.remove(Range{rg.start, i})
 			}
 		}
-		content.remove(rg)
+		c.remove(rg)
 	}
-	if !content.pending.isCompleted() {
-		content.swap()
+	if !c.pending.isCompleted() {
+		c.swap()
 		goto LOOP
 	}
-	content.processing = false
-}
-
-func (f *fileReader) isProcessing(id uint32) bool {
-	return f.contents[id].processing
+	c.unsetProcessing()
 }
 
 func (f *fileReader) isPull(fileId uint32) bool {
@@ -323,9 +335,9 @@ func (f *fileReader) isPull(fileId uint32) bool {
 }
 
 type Client struct {
-	UUID       string
-	Nickname   string
-	Sign       string
+	UUID       string        // generated 5 digit id
+	Nickname   string        // user typed nickname
+	Sign       string        // chat sign
 	Status     chan struct{} `json:"-"` // initialization status
 	SyncFunc   func()        `json:"-"` // e.t. sync icon
 	ServerAddr string
@@ -338,12 +350,12 @@ type Client struct {
 }
 
 type messages struct {
-	SignedMessages chan SignedMessage `json:"-"`
-	FileMessages   chan WriteReq      `json:"-"`
-	SubMessages    chan ReadReq       `json:"-"`
-	MessageCounter uint32
-	Retries        uint8         // the number of times to retry a failed transmission
-	Timeout        time.Duration // the duration to wait for an acknowledgement
+	SignedMessages chan SignedMessage `json:"-"` // text message
+	FileMessages   chan WriteReq      `json:"-"` // audio and image
+	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
+	MessageCounter uint32             // the number of sent messages
+	Retries        uint8              // the number of times to retry a failed transmission
+	Timeout        time.Duration      // the duration to wait for an acknowledgement
 }
 
 func newMessages() messages {
@@ -351,8 +363,8 @@ func newMessages() messages {
 		Retries:        3,
 		Timeout:        6 * time.Second,
 		SignedMessages: make(chan SignedMessage, 100),
-		FileMessages:   make(chan WriteReq, 100),
-		SubMessages:    make(chan ReadReq, 100),
+		FileMessages:   make(chan WriteReq, 20),
+		SubMessages:    make(chan ReadReq, 20),
 	}
 }
 
@@ -392,14 +404,14 @@ func (f *fileManager) loadCache(id uint32) *CircularBuffer {
 func newFileMetaInfo(
 	dataDir string,
 	nck func(f file),
-	send func(d Data) error,
+	writeOnce func(d Data) error,
 	fileMessages chan<- WriteReq,
 ) fileManager {
 	return fileManager{
 		fileReader: &fileReader{
-			req:      make(chan Nck),
-			send:     send,
-			contents: make(map[uint32]*fileContent),
+			req:       make(chan Nck),
+			writeOnce: writeOnce,
+			contents:  make(map[uint32]*fileContent),
 		},
 		fileWriter: &fileWriter{
 			wrq:          make(chan WriteReq),
@@ -482,19 +494,14 @@ func (a *audioManager) deleteAudioReceiver(fileId uint16, UUID string) (value an
 }
 
 func (a *audioManager) noReceiverLeft(fileId uint16) bool {
-	receivers, ok := a.audioReceiver.Load(fileId)
-	if !ok {
-		return true
-	}
-	cnt := 0
-	receivers.(*sync.Map).Range(func(k, v interface{}) bool {
-		cnt++
-		return cnt < 1
-	})
-	return cnt == 0
+	return a.countReceiver(fileId, 1)
 }
 
 func (a *audioManager) atMostOneReceiver(fileId uint16) bool {
+	return a.countReceiver(fileId, 2)
+}
+
+func (a *audioManager) countReceiver(fileId uint16, num int) bool {
 	receivers, ok := a.audioReceiver.Load(fileId)
 	if !ok {
 		return true
@@ -502,9 +509,9 @@ func (a *audioManager) atMostOneReceiver(fileId uint16) bool {
 	cnt := 0
 	receivers.(*sync.Map).Range(func(k, v interface{}) bool {
 		cnt++
-		return cnt < 2
+		return cnt < num
 	})
-	return cnt < 2
+	return cnt < num
 }
 
 func (a *audioManager) cleanup(fileId uint16) {
@@ -519,41 +526,23 @@ func (c *Client) Ready() {
 }
 
 func (c *Client) SyncIcon(img image.Image) error {
-	return c.sendImage(img, OpSyncIcon, "icon.png")
-}
-
-func (c *Client) SyncGif(gifImg *gif.GIF) error {
-	return c.sendGif(gifImg, OpSyncIcon, "icon.gif")
-}
-
-func (c *Client) SendImage(img image.Image, filename string) error {
-	if filepath.Ext(filename) == ".webp" {
-		filename = strings.TrimSuffix(filepath.Base(filename), ".webp") + ".png"
-	}
-	return c.sendImage(img, OpSendImage, filename)
-}
-
-func (c *Client) sendImage(img image.Image, code OpCode, filename string) error {
+	filename := "icon.png"
 	buf := new(bytes.Buffer)
 	err := EncodeImg(buf, filename, img)
 	if err != nil {
 		return err
 	}
-
-	return c.SendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, 0, 0)
 }
 
-func (c *Client) SendGif(GIF *gif.GIF, filename string) error {
-	return c.sendGif(GIF, OpSendGif, filename)
-}
-
-func (c *Client) sendGif(GIF *gif.GIF, code OpCode, filename string) error {
+func (c *Client) SyncGif(gifImg *gif.GIF) error {
+	filename := "icon.gif"
 	buf := new(bytes.Buffer)
-	err := gif.EncodeAll(buf, GIF)
+	err := gif.EncodeAll(buf, gifImg)
 	if err != nil {
 		return err
 	}
-	return c.SendFile(bytes.NewReader(buf.Bytes()), code, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, 0, 0)
 }
 
 func (c *Client) SendVoice(filename string, duration uint64) error {
@@ -633,6 +622,8 @@ func (c *Client) SubscribeFile(id uint32, sender string, updateProgress func(p i
 }
 
 func (c *Client) UnsubscribeFile(id uint32, sender string) error {
+	// clean OpContent wrq after finished download
+	c.clean(id)
 	return c.send(&ReadReq{Code: OpUnsubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
@@ -749,8 +740,8 @@ func (c *Client) ListenAndServe(addr string) {
 					close(c.Status)
 				}
 			})
-			sentEnoughMessages := c.MessageCounter > threshold
-			if sentEnoughMessages && c.SyncFunc != nil {
+			ok := c.MessageCounter > threshold
+			if ok && c.SyncFunc != nil {
 				c.MessageCounter = 0
 				threshold++
 				c.SyncFunc()
@@ -784,7 +775,6 @@ func (c *Client) SendSign() {
 }
 
 func (c *Client) serve(conn net.PacketConn) {
-
 	for {
 		buf := make([]byte, DatagramSize)
 		_ = conn.SetReadDeadline(time.Now().Add(c.Timeout))
@@ -821,7 +811,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 	case msg.Unmarshal(buf) == nil:
 		c.ack(conn, addr, 0)
 		s := string(msg.Payload)
-		log.Printf("received text [%s] from [%s]\n", s, msg.Sign.UUID)
+		log.Printf("Receiving text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
 		c.ack(conn, addr, 0)
@@ -860,7 +850,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			c.FileMessages <- wrq
 		case OpContent:
 			// content ready
-			c.addFile(wrq)
+			fallthrough
 		default:
 			c.addFile(wrq)
 		}

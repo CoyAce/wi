@@ -219,6 +219,24 @@ func TestUnknownUser(t *testing.T) {
 	}
 }
 
+func TestSyncMap(t *testing.T) {
+	rrq := ReadReq{Code: OpSubscribe, Subscriber: "sub"}
+	m := sync.Map{}
+	m.Store(rrq.Subscriber, rrq)
+	m.Range(func(k, v interface{}) bool {
+		r := v.(ReadReq)
+		r.Code = OpContent
+		return true
+	})
+	sub, ok := m.Load(rrq.Subscriber)
+	if !ok {
+		t.Fatal("expected subscriber")
+	}
+	if sub.(ReadReq).Code != OpSubscribe {
+		t.Errorf("expected OpSubscribe; actual %#v", sub)
+	}
+}
+
 func newClient(serverAddr string, UUID string) *Client {
 	client := Client{DataDir: "./test", ServerAddr: serverAddr, Status: make(chan struct{}), UUID: UUID, Sign: "default"}
 	go func() {
