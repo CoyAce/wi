@@ -29,8 +29,7 @@ type file struct {
 }
 
 type updater struct {
-	updateProgress func(p int) // progress updater
-	updateSpeed    func(s int) // speed updater
+	update func(p int, s int) // progress and speed updater
 }
 
 type fileWriter struct {
@@ -69,11 +68,17 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.data = append(fd.data, data)
 	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
-		fd.updateMetrics()
+		if fd.elapsed1Second() {
+			fd.updateMetrics()
+		}
 		if !f.isPull(data.FileId) {
 			f.tryNck(*fd)
 		}
 	}
+}
+
+func (f *file) elapsed1Second() bool {
+	return time.Since(f.updateAt) >= 1*time.Second
 }
 
 func (f *file) updateMetrics() {
@@ -90,8 +95,7 @@ func (f *file) reset() {
 }
 
 func (f *file) update() {
-	f.updateSpeed(f.getSpeed())
-	f.updateProgress(f.rt.GetProgress())
+	f.updater.update(f.rt.GetProgress(), f.getSpeed())
 }
 
 func (f *file) getSpeed() int {
@@ -176,6 +180,9 @@ func (f *fileWriter) tryComplete(id uint32) {
 	} else {
 		f.nck(*fd)
 		f.tryCompleteIn1Second(fd)
+		if fd.elapsed1Second() {
+			fd.updateMetrics()
+		}
 	}
 }
 
@@ -635,8 +642,8 @@ func (c *Client) PublishContent(name string, size uint64, id uint32, content io.
 	return c.send(&WriteReq{Code: OpContent, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
-func (c *Client) SubscribeFile(id uint32, sender string, updateProgress func(p int), updateSpeed func(s int)) error {
-	c.updaters[id] = &updater{updateProgress: updateProgress, updateSpeed: updateSpeed}
+func (c *Client) SubscribeFile(id uint32, sender string, update func(p int, s int)) error {
+	c.updaters[id] = &updater{update: update}
 	return c.send(&ReadReq{Code: OpSubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
