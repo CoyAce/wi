@@ -74,7 +74,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			return
 		}
 		if w, ok := s.isContent(data.FileId); ok {
-			s.relayToSubscribers(conn, *w, pkt)
+			s.relayToSubscribers(conn, data, *w, pkt, addr, n)
 			return
 		}
 		s.handleFileData(conn, data, pkt, addr, n)
@@ -131,7 +131,10 @@ func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
 	return &w, w.Code == OpContent
 }
 
-func (s *Server) relayToSubscribers(conn net.PacketConn, wrq WriteReq, pkt []byte) {
+func (s *Server) relayToSubscribers(conn net.PacketConn, data Data, wrq WriteReq, pkt []byte, sender net.Addr, n int) {
+	if s.isFinalPacket(n) {
+		s.ack(conn, sender, data.Block)
+	}
 	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
 	if !ok {
 		return
@@ -232,9 +235,8 @@ func (s *Server) handleStreamData(conn net.PacketConn, data Data, pkt []byte, se
 }
 
 func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, sender net.Addr, n int) {
-	isLastPacket := n < DatagramSize
 	sign := s.findSignByFileId(data.FileId)
-	if isLastPacket {
+	if s.isFinalPacket(n) {
 		s.ack(conn, sender, data.Block)
 		s.handle(sign, pkt)
 		time.AfterFunc(5*time.Minute, func() {
@@ -243,6 +245,10 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	} else {
 		s.directRelay(conn, sign, pkt)
 	}
+}
+
+func (s *Server) isFinalPacket(n int) bool {
+	return n < DatagramSize
 }
 
 func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {

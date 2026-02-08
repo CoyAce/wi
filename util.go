@@ -183,7 +183,10 @@ func (r *RangeTracker) GetProgress() int {
 }
 
 func (r *RangeTracker) Set(ranges []Range) {
-	r.latestBlock = ranges[len(ranges)-1].end + 1
+	n := len(ranges)
+	if n > 0 {
+		r.latestBlock = ranges[n-1].end + 1
+	}
 	r.ranges = ranges
 }
 

@@ -62,6 +62,7 @@ func (f *fileWriter) loop() {
 
 func (f *fileWriter) tryWrite(data Data) {
 	fd := f.files[data.FileId]
+	fd.counter++
 	req := fd.req
 	fd.data = append(fd.data, data)
 	if f.received256kb(fd) {
@@ -77,7 +78,6 @@ func (f *file) updateMetrics() {
 	if f.updater == nil {
 		return
 	}
-	f.counter++
 	f.update()
 	f.reset()
 }
@@ -699,9 +699,22 @@ func (c *Client) writeOnce(data Data) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
-	if err != nil {
-		return err
+	isLastPacket := len(pkt) != DatagramSize
+	if isLastPacket {
+		conn, err := net.Dial("udp", c.ServerAddr)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close() }()
+		_, err = c.sendPacket(conn, pkt, data.Block)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = c.conn.WriteTo(pkt, c.SAddr)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
