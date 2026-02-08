@@ -74,7 +74,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			return
 		}
 		if w, ok := s.isContent(data.FileId); ok {
-			s.dispatchToSubscribers(*w, pkt)
+			s.relayToSubscribers(conn, *w, pkt)
 			return
 		}
 		s.handleFileData(conn, data, pkt, addr, n)
@@ -129,6 +129,20 @@ func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
 	}
 	w := wrq.(WriteReq)
 	return &w, w.Code == OpContent
+}
+
+func (s *Server) relayToSubscribers(conn net.PacketConn, wrq WriteReq, pkt []byte) {
+	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
+	if !ok {
+		return
+	}
+	subs.(*sync.Map).Range(func(k, v interface{}) bool {
+		go func() {
+			_, addr := s.findTarget(k.(string))
+			_, _ = conn.WriteTo(pkt, addr)
+		}()
+		return true
+	})
 }
 
 func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
@@ -235,8 +249,8 @@ func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
 			go func() {
-				udpAddr, _ := net.ResolveUDPAddr("udp", key.(string))
-				_, _ = conn.WriteTo(pkt, udpAddr)
+				addr, _ := net.ResolveUDPAddr("udp", key.(string))
+				_, _ = conn.WriteTo(pkt, addr)
 			}()
 		}
 		return true
