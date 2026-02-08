@@ -23,6 +23,7 @@ type file struct {
 	counter  int
 	createAt time.Time
 	updateAt time.Time
+	timer    *time.Timer
 	rt       *RangeTracker
 	*updater
 }
@@ -48,6 +49,7 @@ func (f *fileWriter) loop() {
 		select {
 		// last block received, complete file transfer
 		case id := <-f.fileId:
+			// 这里可能执行多次
 			f.tryComplete(id)
 		case req := <-f.wrq:
 			f.init(req)
@@ -173,13 +175,16 @@ func (f *fileWriter) tryComplete(id uint32) {
 		f.fileMessages <- req
 	} else {
 		f.nck(*fd)
-		f.tryCompleteIn1Second(id)
+		f.tryCompleteIn1Second(fd)
 	}
 }
 
-func (f *fileWriter) tryCompleteIn1Second(id uint32) {
-	time.AfterFunc(1*time.Second, func() {
-		f.tryComplete(id)
+func (f *fileWriter) tryCompleteIn1Second(fd *file) {
+	if fd.timer != nil {
+		fd.timer.Stop()
+	}
+	fd.timer = time.AfterFunc(1*time.Second, func() {
+		f.tryComplete(fd.req.FileId)
 	})
 }
 
@@ -933,6 +938,7 @@ func (c *Client) nck(f file) {
 	if err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
+	log.Printf("request missing packets %v", nck)
 }
 
 func (c *Client) SetNickName(nickname string) {
