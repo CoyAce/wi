@@ -395,8 +395,8 @@ type fileManager struct {
 	lock      sync.Mutex
 }
 
-func (f *fileManager) cleanCacheIn5Min(id uint32) *time.Timer {
-	return time.AfterFunc(5*time.Minute, func() {
+func (f *fileManager) cleanCacheIn20Seconds(id uint32) *time.Timer {
+	return time.AfterFunc(20*time.Second, func() {
 		f.lock.Lock()
 		delete(f.fileCache, id)
 		f.lock.Unlock()
@@ -406,7 +406,7 @@ func (f *fileManager) cleanCacheIn5Min(id uint32) *time.Timer {
 func (f *fileManager) initCache(id uint32) {
 	f.lock.Lock()
 	defer f.lock.Unlock()
-	f.fileCache[id] = NewCircularBuffer(block512kb)
+	f.fileCache[id] = NewCircularBuffer(block32MB)
 }
 
 func (f *fileManager) loadCache(id uint32) *CircularBuffer {
@@ -690,7 +690,7 @@ func (c *Client) sendData(conn net.Conn, data Data) error {
 			return err
 		}
 	}
-	c.cleanCacheIn5Min(data.FileId)
+	c.cleanCacheIn20Seconds(data.FileId)
 	return nil
 }
 
@@ -920,7 +920,6 @@ func (c *Client) nck(f file) {
 	if err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
-	log.Printf("request missing packets %v", nck)
 }
 
 func (c *Client) SetNickName(nickname string) {
@@ -980,4 +979,4 @@ RETRY:
 }
 
 var DefaultClient *Client
-var block512kb = 512 * 1024 / BlockSize
+var block32MB = 32 * 1024 * 1024 / BlockSize
