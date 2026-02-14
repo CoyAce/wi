@@ -783,7 +783,18 @@ func (c *Client) SendSign() {
 	_, err = c.conn.WriteTo(pkt, c.SAddr)
 	if err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-		return
+	}
+}
+
+func (c *Client) SignOut() {
+	op := OpSignOut
+	pkt, err := op.Marshal()
+	if err != nil {
+		log.Printf("marshal failed: %v", err)
+	}
+	_, err = c.conn.WriteTo(pkt, c.SAddr)
+	if err != nil {
+		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
 }
 
@@ -933,11 +944,12 @@ func (c *Client) SetServerAddr(addr string) {
 func (c *Client) sendPacket(conn net.Conn, bytes []byte, block uint32) (int, error) {
 	var (
 		ackPkt Ack
+		ec     ErrCode
 		buf    = make([]byte, DatagramSize)
 	)
 RETRY:
 	for i := c.Retries; i > 0; i-- {
-		n, err := conn.Write(bytes)
+		_, err := conn.Write(bytes)
 		if err != nil {
 			log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 			return 0, err
@@ -945,7 +957,7 @@ RETRY:
 
 		// wait for the Server's ACK packet
 		_ = conn.SetReadDeadline(time.Now().Add(c.Timeout))
-		_, err = conn.Read(buf)
+		n, err := conn.Read(buf)
 
 		if err != nil {
 			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
@@ -965,6 +977,10 @@ RETRY:
 		case ackPkt.Unmarshal(buf[:n]) == nil:
 			if block == 0 || ackPkt.Block == block {
 				return n, nil
+			}
+		case ec.Unmarshal(buf) == nil:
+			if ec == ErrUnknownUser {
+				c.SendSign()
 			}
 		default:
 			log.Printf("[%s] bad packet", c.ServerAddr)

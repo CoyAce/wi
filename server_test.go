@@ -233,6 +233,24 @@ func TestUnknownUser(t *testing.T) {
 	}
 }
 
+func TestSignOut(t *testing.T) {
+	server, serverAddr := setUpServer(t)
+	sender := newClient(serverAddr, "sender")
+	time.Sleep(1 * time.Millisecond)
+	if server.findAddrByUUID("sender") == "" {
+		t.Errorf("sender not found by UUID")
+	}
+	sender.SignOut()
+	time.Sleep(1 * time.Millisecond)
+	if server.findAddrByUUID("sender") != "" {
+		t.Errorf("sign out failed")
+	}
+	_ = sender.SendText("hello")
+	if server.findAddrByUUID("sender") == "" {
+		t.Errorf("should retry sign")
+	}
+}
+
 func TestSyncMap(t *testing.T) {
 	rrq := ReadReq{Code: OpSubscribe, Subscriber: "sub"}
 	m := sync.Map{}
@@ -248,6 +266,21 @@ func TestSyncMap(t *testing.T) {
 	}
 	if sub.(ReadReq).Code != OpSubscribe {
 		t.Errorf("expected OpSubscribe; actual %#v", sub)
+	}
+}
+
+func TestOpCode(t *testing.T) {
+	s := OpSign
+	op := OpSignOut
+	pkt, err := op.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Unmarshal(pkt) == nil {
+		t.Errorf("expected op sign out; actual %#v", s)
+	}
+	if op.Unmarshal(pkt) != nil {
+		t.Errorf("expected op sign out; actual %#v", op)
 	}
 }
 

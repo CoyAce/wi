@@ -57,6 +57,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		wrq  WriteReq
 		data = Data{}
 		nck  = Nck{}
+		oso  = OpSignOut
 	)
 	switch {
 	case msg.Unmarshal(pkt) == nil:
@@ -124,6 +125,8 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 	case nck.Unmarshal(pkt) == nil:
 		s.ack(conn, addr, 0)
 		s.handleNck(pkt, nck)
+	case oso.Unmarshal(pkt) == nil:
+		s.removeByAddr(addr.String())
 	}
 }
 

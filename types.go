@@ -19,6 +19,7 @@ const (
 	OpWRQ
 	OpData
 	OpSign
+	OpSignOut
 	OpSignedMSG
 	OpAck
 	OpNck
@@ -55,6 +56,29 @@ var rrqSet = map[OpCode]bool{
 	OpRRQ:         true,
 	OpSubscribe:   true,
 	OpUnsubscribe: true,
+}
+
+func (op *OpCode) Marshal() ([]byte, error) {
+	b := new(bytes.Buffer)
+	b.Grow(2)
+
+	err := binary.Write(b, binary.BigEndian, op) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (op *OpCode) Unmarshal(p []byte) error {
+	b := bytes.NewBuffer(p)
+	var code OpCode
+
+	err := binary.Read(b, binary.BigEndian, &code) // read operation code
+	if err != nil || code != *op {
+		return errors.New("invalid DATA")
+	}
+	return nil
 }
 
 type Req interface {
@@ -465,7 +489,7 @@ func (e *ErrCode) Unmarshal(p []byte) error {
 		return errors.New("invalid DATA")
 	}
 
-	err = binary.Read(r, binary.BigEndian, &e) // read error code
+	err = binary.Read(r, binary.BigEndian, e) // read error code
 	if err != nil {
 		return err
 	}
