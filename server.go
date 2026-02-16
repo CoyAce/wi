@@ -67,7 +67,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			return
 		}
 		s.ack(conn, addr, 0)
-		s.handle(msg.Sign, pkt)
+		s.handle(conn, msg.Sign, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
@@ -107,24 +107,24 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 			}
 		case OpContent:
 			s.addFile(wrq)
-			s.dispatchToSubscribers(wrq, pkt)
+			s.dispatchToSubscribers(conn, wrq, pkt)
 			return
 		default:
 			s.addFile(wrq)
 		}
-		s.handle(s.findSignByUUID(wrq.UUID), pkt)
+		s.handle(conn, s.findSignByUUID(wrq.UUID), pkt)
 	case rrq.Unmarshal(pkt) == nil:
 		s.ack(conn, addr, 0)
 		switch rrq.Code {
 		case OpSubscribe:
-			s.dispatchToPublisher(pkt, rrq)
+			s.dispatchToPublisher(conn, pkt, rrq)
 		case OpUnsubscribe:
 			s.deleteSub(rrq)
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
 		s.ack(conn, addr, 0)
-		s.handleNck(pkt, nck)
+		s.handleNck(conn, pkt, nck)
 	case oso.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
 	}
@@ -156,18 +156,21 @@ func (s *Server) relayToSubscribers(conn net.PacketConn, data Data, wrq WriteReq
 	})
 }
 
-func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
+func (s *Server) dispatchToSubscribers(conn net.PacketConn, wrq WriteReq, pkt []byte) {
 	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
 	if !ok {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go s.connectAndDispatch(s.findAddrByUUID(k.(string)), pkt)
+		go func() {
+			_, addr := s.findTarget(k.(string))
+			_, _ = conn.WriteTo(pkt, addr)
+		}()
 		return true
 	})
 }
 
-func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
+func (s *Server) dispatchToPublisher(conn net.PacketConn, pkt []byte, rrq ReadReq) {
 	pair := FilePair{FileId: rrq.FileId, UUID: rrq.Publisher}
 	subs, ok := s.pubMap.Load(pair)
 	if !ok {
@@ -175,7 +178,10 @@ func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 		s.pubMap.Store(pair, subs)
 	}
 	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
-	go s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
+	go func() {
+		_, addr := s.findTarget(rrq.Publisher)
+		_, _ = conn.WriteTo(pkt, addr)
+	}()
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
@@ -192,9 +198,12 @@ func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
 	_, _ = conn.WriteTo(p, addr)
 }
 
-func (s *Server) handleNck(pkt []byte, nck Nck) {
+func (s *Server) handleNck(conn net.PacketConn, pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
-	go s.connectAndDispatch(s.findAddrByUUID(sign.UUID), pkt)
+	go func() {
+		_, addr := s.findTarget(sign.UUID)
+		_, _ = conn.WriteTo(pkt, addr)
+	}()
 }
 
 func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
@@ -244,7 +253,7 @@ func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, send
 	sign := s.findSignByFileId(data.FileId)
 	if s.isFinalPacket(n) {
 		s.ack(conn, sender, data.Block)
-		s.handle(sign, pkt)
+		s.handle(conn, sign, pkt)
 		time.AfterFunc(5*time.Minute, func() {
 			s.fileMap.Delete(data.FileId)
 		})
@@ -324,11 +333,14 @@ func (s *Server) ack(conn net.PacketConn, clientAddr net.Addr, block uint32) {
 	}
 }
 
-func (s *Server) handle(sign Sign, bytes []byte) {
+func (s *Server) handle(conn net.PacketConn, sign Sign, bytes []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
-			go s.connectAndDispatch(key.(string), bytes)
+			go func() {
+				udpAddr, _ := net.ResolveUDPAddr("udp", key.(string))
+				_, _ = conn.WriteTo(bytes, udpAddr)
+			}()
 		}
 		return true
 	})
