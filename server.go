@@ -53,14 +53,14 @@ func (s *Server) Serve() error {
 
 func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 	var (
-		sign Sign
-		msg  SignedMessage
-		rrq  ReadReq
-		wrq  WriteReq
-		data = Data{}
-		ack  = Ack{}
-		nck  = Nck{}
-		oso  = OpSignOut
+		sign   Sign
+		msg    SignedMessage
+		rrq    ReadReq
+		wrq    WriteReq
+		data   = Data{}
+		ack    = Ack{}
+		nck    = Nck{}
+		unsign = OpSignOut
 	)
 	switch {
 	case ack.Unmarshal(pkt) == nil:
@@ -137,7 +137,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 	case nck.Unmarshal(pkt) == nil:
 		s.ack(addr, 0)
 		s.handleNck(pkt, nck)
-	case oso.Unmarshal(pkt) == nil:
+	case unsign.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
 	}
 }
