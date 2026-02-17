@@ -47,10 +47,10 @@ func (f *fileWriter) loop() {
 		case req := <-f.wrq:
 			if req.Code == OpReady {
 				log.Printf("OpReady received, try complete")
-				f.tryComplete(req.FileId)
 				if !f.isFile(req.FileId) {
 					continue
 				}
+				f.tryComplete(req.FileId)
 			} else {
 				f.init(req)
 			}
