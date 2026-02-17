@@ -5,7 +5,6 @@ import (
 	"log"
 	"net"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -14,9 +13,11 @@ type Server struct {
 	Timeout time.Duration // the duration to wait for an acknowledgement
 	fileMap sync.Map      // fileId -> wrq
 	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
-	addrMap sync.Map      // addr -> sign
+	addrMap sync.Map      // addr -> Sign
 	uuidMap sync.Map      // uuid -> addr
+	ackMap  sync.Map      // addr -> ack chan
 	*audioManager
+	conn net.PacketConn
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -26,67 +27,78 @@ func (s *Server) ListenAndServe(addr string) error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	log.Printf("Listening on %s ...\n", conn.LocalAddr())
-	return s.Serve(conn)
+	s.conn = conn
+	return s.Serve()
 }
 
-func (s *Server) Serve(conn net.PacketConn) error {
-	if conn == nil {
+func (s *Server) Serve() error {
+	if s.conn == nil {
 		return errors.New("nil connection")
 	}
+	log.Printf("Listening on %s ...\n", s.conn.LocalAddr())
 
 	s.init()
 
 	for {
 		buf := make([]byte, DatagramSize)
-		n, addr, err := conn.ReadFrom(buf)
+		n, addr, err := s.conn.ReadFrom(buf)
 		if err != nil {
 			return err
 		}
 
 		pkt := buf[:n]
-		go s.relay(conn, pkt, addr, n)
+		go s.relay(pkt, addr, n)
 	}
 }
 
-func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
+func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 	var (
 		sign Sign
 		msg  SignedMessage
 		rrq  ReadReq
 		wrq  WriteReq
 		data = Data{}
+		ack  = Ack{}
 		nck  = Nck{}
 		oso  = OpSignOut
 	)
 	switch {
+	case ack.Unmarshal(pkt) == nil:
+		ch, _ := s.ackMap.Load(addr.String())
+		select {
+		case ch.(chan struct{}) <- struct{}{}:
+		default:
+		}
 	case msg.Unmarshal(pkt) == nil:
-		exist := s.checkUser(msg.Sign)
+		exist := s.checkUser(msg.Sign.UUID)
 		if !exist {
-			s.reject(conn, addr)
+			s.reject(addr)
 			return
 		}
-		s.ack(conn, addr, 0)
+		s.ack(addr, 0)
 		s.handle(msg.Sign, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
-			s.handleStreamData(conn, data, pkt, addr)
+			s.handleStreamData(data, pkt, addr)
 			return
 		}
 		if w, ok := s.isContent(data.FileId); ok {
-			s.relayToSubscribers(conn, data, *w, pkt, addr, n)
+			s.relayToSubscribers(data, *w, pkt, addr, n)
 			return
 		}
-		s.handleFileData(conn, data, pkt, addr, n)
+		s.handleFileData(data, pkt, addr, n)
 	case sign.Unmarshal(pkt) == nil:
-		s.ack(conn, addr, 0)
-		s.removeByUUID(sign.UUID)
+		s.ack(addr, 0)
+		if s.sameUser(sign.UUID, addr.String()) {
+			return
+		}
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), sign)
+		s.ackMap.Store(addr.String(), make(chan struct{}))
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
-		s.ack(conn, addr, 0)
+		s.ack(addr, 0)
 		audioId := s.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -114,7 +126,7 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		}
 		s.handle(s.findSignByUUID(wrq.UUID), pkt)
 	case rrq.Unmarshal(pkt) == nil:
-		s.ack(conn, addr, 0)
+		s.ack(addr, 0)
 		switch rrq.Code {
 		case OpSubscribe:
 			s.dispatchToPublisher(pkt, rrq)
@@ -123,11 +135,17 @@ func (s *Server) relay(conn net.PacketConn, pkt []byte, addr net.Addr, n int) {
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		s.ack(conn, addr, 0)
+		s.ack(addr, 0)
 		s.handleNck(pkt, nck)
 	case oso.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
 	}
+}
+
+func (s *Server) sameUser(UUID string, addr string) bool {
+	exist := s.checkUser(UUID)
+	sameAddr := addr == s.findAddrByUUID(UUID)
+	return exist && sameAddr
 }
 
 func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
@@ -139,9 +157,9 @@ func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
 	return &w, w.Code == OpContent
 }
 
-func (s *Server) relayToSubscribers(conn net.PacketConn, data Data, wrq WriteReq, pkt []byte, sender net.Addr, n int) {
+func (s *Server) relayToSubscribers(data Data, wrq WriteReq, pkt []byte, sender net.Addr, n int) {
 	if s.isFinalPacket(n) {
-		s.ack(conn, sender, data.Block)
+		s.ack(sender, data.Block)
 	}
 	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
 	if !ok {
@@ -150,7 +168,7 @@ func (s *Server) relayToSubscribers(conn net.PacketConn, data Data, wrq WriteReq
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
 		go func() {
 			_, addr := s.findTarget(k.(string))
-			_, _ = conn.WriteTo(pkt, addr)
+			_, _ = s.conn.WriteTo(pkt, addr)
 		}()
 		return true
 	})
@@ -162,7 +180,7 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go s.connectAndDispatch(s.findAddrByUUID(k.(string)), pkt)
+		go s.dispatch(s.findAddrByUUID(k.(string)), pkt)
 		return true
 	})
 }
@@ -175,7 +193,7 @@ func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 		s.pubMap.Store(pair, subs)
 	}
 	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
-	go s.connectAndDispatch(s.findAddrByUUID(rrq.Publisher), pkt)
+	go s.dispatch(s.findAddrByUUID(rrq.Publisher), pkt)
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
@@ -186,15 +204,15 @@ func (s *Server) deleteSub(rrq ReadReq) {
 	subs.(*sync.Map).Delete(rrq.Subscriber)
 }
 
-func (s *Server) reject(conn net.PacketConn, addr net.Addr) {
+func (s *Server) reject(addr net.Addr) {
 	err := ErrUnknownUser
 	p, _ := err.Marshal()
-	_, _ = conn.WriteTo(p, addr)
+	_, _ = s.conn.WriteTo(p, addr)
 }
 
 func (s *Server) handleNck(pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
-	go s.connectAndDispatch(s.findAddrByUUID(sign.UUID), pkt)
+	go s.dispatch(s.findAddrByUUID(sign.UUID), pkt)
 }
 
 func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
@@ -219,7 +237,7 @@ func (s *Server) removeByAddr(addr string) {
 	}
 }
 
-func (s *Server) handleStreamData(conn net.PacketConn, data Data, pkt []byte, sender net.Addr) {
+func (s *Server) handleStreamData(data Data, pkt []byte, sender net.Addr) {
 	senderSign, ok := s.addrMap.Load(sender.String())
 	if !ok {
 		return
@@ -233,23 +251,23 @@ func (s *Server) handleStreamData(conn net.PacketConn, data Data, pkt []byte, se
 		if key != UUID {
 			go func() {
 				_, addr := s.findTarget(key.(string))
-				_, _ = conn.WriteTo(pkt, addr)
+				_, _ = s.conn.WriteTo(pkt, addr)
 			}()
 		}
 		return true
 	})
 }
 
-func (s *Server) handleFileData(conn net.PacketConn, data Data, pkt []byte, sender net.Addr, n int) {
+func (s *Server) handleFileData(data Data, pkt []byte, sender net.Addr, n int) {
 	sign := s.findSignByFileId(data.FileId)
 	if s.isFinalPacket(n) {
-		s.ack(conn, sender, data.Block)
+		s.ack(sender, data.Block)
 		s.handle(sign, pkt)
 		time.AfterFunc(5*time.Minute, func() {
 			s.fileMap.Delete(data.FileId)
 		})
 	} else {
-		s.directRelay(conn, sign, pkt)
+		s.directRelay(sign, pkt)
 	}
 }
 
@@ -257,12 +275,12 @@ func (s *Server) isFinalPacket(n int) bool {
 	return n < DatagramSize
 }
 
-func (s *Server) directRelay(conn net.PacketConn, sign Sign, pkt []byte) {
+func (s *Server) directRelay(sign Sign, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
 			go func() {
 				addr, _ := net.ResolveUDPAddr("udp", key.(string))
-				_, _ = conn.WriteTo(pkt, addr)
+				_, _ = s.conn.WriteTo(pkt, addr)
 			}()
 		}
 		return true
@@ -314,12 +332,12 @@ func (s *Server) findSignByFileId(fileId uint32) Sign {
 	return s.findSignByUUID(UUID)
 }
 
-func (s *Server) ack(conn net.PacketConn, clientAddr net.Addr, block uint32) {
+func (s *Server) ack(addr net.Addr, block uint32) {
 	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
-	_, err = conn.WriteTo(pkt, clientAddr)
+	_, err = s.conn.WriteTo(pkt, addr)
 	if err != nil {
-		log.Printf("[%s] write failed: %v", clientAddr, err)
+		log.Printf("[%s] write failed: %v", addr, err)
 		return
 	}
 }
@@ -328,74 +346,28 @@ func (s *Server) handle(sign Sign, bytes []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
-			go s.connectAndDispatch(key.(string), bytes)
+			go s.dispatch(key.(string), bytes)
 		}
 		return true
 	})
 }
 
-func (s *Server) checkUser(sign Sign) bool {
-	_, ok := s.uuidMap.Load(sign.UUID)
+func (s *Server) checkUser(UUID string) bool {
+	_, ok := s.uuidMap.Load(UUID)
 	return ok
 }
 
-// connectAndDispatch may block by slow connection
-func (s *Server) connectAndDispatch(addr string, bytes []byte) {
+// dispatch may block by slow connection
+func (s *Server) dispatch(addr string, bytes []byte) {
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
-	conn, err := net.Dial("udp", addr)
-	if err != nil {
-		log.Printf("[%s] dial failed: %v", addr, err)
-		if errors.Is(err, syscall.ECONNREFUSED) {
-			s.removeByAddr(addr)
-		}
-		return
-	}
-	defer func() {
-		if conn != nil {
-			_ = conn.Close()
-		}
-	}()
-
-	s.dispatch(udpAddr, conn, bytes)
-}
-
-func (s *Server) dispatch(clientAddr net.Addr, conn net.Conn, bytes []byte) {
-	var (
-		ackPkt Ack
-	)
-	buf := make([]byte, DatagramSize)
-RETRY:
-	for i := s.Retries; i > 0; i-- {
-		_, err := conn.Write(bytes)
-		if err != nil {
-			log.Printf("[%s] write failed: %v", clientAddr, err)
+	ack, _ := s.ackMap.Load(addr)
+	for i := uint8(0); i < s.Retries; i++ {
+		_, _ = s.conn.WriteTo(bytes, udpAddr)
+		select {
+		case <-ack.(chan struct{}):
 			return
-		}
-
-		// wait for the client's ACK packet
-		_ = conn.SetReadDeadline(time.Now().Add(s.Timeout))
-		_, err = conn.Read(buf)
-
-		if err != nil {
-			var nErr net.Error
-			if errors.As(err, &nErr) && nErr.Timeout() {
-				continue RETRY
-			}
-			if errors.Is(err, syscall.ECONNREFUSED) {
-				s.removeByAddr(clientAddr.String())
-				log.Printf("[%s] connection refused", clientAddr)
-			}
-			log.Printf("[%s] waiting for ACK: %v", clientAddr, err)
-			return
-		}
-
-		switch {
-		case ackPkt.Unmarshal(buf) == nil:
-			return
-		default:
-			log.Printf("[%s] bad packet", clientAddr)
+		case <-time.After(s.Timeout):
 		}
 	}
-	log.Printf("[%s] exhausted retries", clientAddr)
-	return
+	log.Printf("[%s] write timeout after %d retries", addr, s.Retries)
 }

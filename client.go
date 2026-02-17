@@ -764,8 +764,7 @@ func (c *Client) ListenAndServe(addr string) {
 		}
 	}()
 
-	log.Printf("Listening on %s ...\n", conn.LocalAddr())
-	c.serve(conn)
+	c.serve()
 }
 
 func (c *Client) init() {
@@ -798,11 +797,12 @@ func (c *Client) SignOut() {
 	}
 }
 
-func (c *Client) serve(conn net.PacketConn) {
+func (c *Client) serve() {
+	log.Printf("Listening on %s ...\n", c.conn.LocalAddr())
 	for {
 		buf := make([]byte, DatagramSize)
-		_ = conn.SetReadDeadline(time.Now().Add(c.Timeout))
-		n, addr, err := conn.ReadFrom(buf)
+		_ = c.conn.SetReadDeadline(time.Now().Add(c.Timeout))
+		n, addr, err := c.conn.ReadFrom(buf)
 		if err != nil {
 			var nErr net.Error
 			if errors.As(err, &nErr) && nErr.Timeout() {
@@ -815,11 +815,11 @@ func (c *Client) serve(conn net.PacketConn) {
 			//log.Printf("[%s] receive text: %v", c.ServerAddr, err)
 			continue
 		}
-		go c.handle(buf[:n], conn, addr)
+		go c.handle(buf[:n], addr)
 	}
 }
 
-func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
+func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
 		ack  Ack
 		nck  Nck
@@ -833,19 +833,19 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 	case ack.Unmarshal(buf) == nil:
 		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
-		c.ack(conn, addr, 0)
+		c.ack(addr, 0)
 		s := string(msg.Payload)
 		log.Printf("Receiving text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
-		c.ack(conn, addr, 0)
+		c.ack(addr, 0)
 		switch rrq.Code {
 		case OpSubscribe:
 			c.SubMessages <- rrq
 		default:
 		}
 	case wrq.Unmarshal(buf) == nil:
-		c.ack(conn, addr, 0)
+		c.ack(addr, 0)
 		audioId := c.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -888,7 +888,7 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 			c.fileData <- data
 		}
 	case nck.Unmarshal(buf) == nil:
-		c.ack(conn, addr, 0)
+		c.ack(addr, 0)
 		log.Printf("nck received")
 		if c.fileReader.isPull(nck.FileId) {
 			c.req <- nck
@@ -910,10 +910,10 @@ func (c *Client) handle(buf []byte, conn net.PacketConn, addr net.Addr) {
 	}
 }
 
-func (c *Client) ack(conn net.PacketConn, addr net.Addr, block uint32) {
+func (c *Client) ack(addr net.Addr, block uint32) {
 	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
-	_, err = conn.WriteTo(pkt, addr)
+	_, err = c.conn.WriteTo(pkt, addr)
 	if err != nil {
 		log.Printf("[%s] write failed: %v", addr, err)
 	}
