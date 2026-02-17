@@ -64,7 +64,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 	)
 	switch {
 	case ack.Unmarshal(pkt) == nil:
-		ch, _ := s.ackMap.Load(addr.String())
+		ch, ok := s.ackMap.Load(addr.String())
+		if !ok {
+			return
+		}
 		select {
 		case ch.(chan struct{}) <- struct{}{}:
 		default:
