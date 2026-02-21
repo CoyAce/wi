@@ -132,22 +132,31 @@ func (f *fileWriter) init(req WriteReq) {
 	if f.isProcessing(req) {
 		return
 	}
-	f.files[req.FileId] = &file{
+	rt := f.newRangeTracker(req.Size)
+	fd := &file{
 		req:      req,
-		rt:       &RangeTracker{},
+		rt:       rt,
 		createAt: time.Now(),
 		updateAt: time.Now(),
 		updater:  f.updaters[req.FileId],
 	}
+	f.files[req.FileId] = fd
 	if f.isPull(req.FileId) {
-		f.pull(req)
+		f.pull(fd)
 	}
 }
 
-func (f *fileWriter) pull(req WriteReq) {
-	finalBlock := (req.Size + BlockSize - 1) / BlockSize
-	fd := f.files[req.FileId]
-	fd.rt.Add(MonoRange(uint32(finalBlock + 1)))
+func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
+	rt := &RangeTracker{}
+	if size == 0 {
+		return rt
+	}
+	finalBlock := (size + BlockSize - 1) / BlockSize
+	rt.Add(MonoRange(uint32(finalBlock + 1)))
+	return rt
+}
+
+func (f *fileWriter) pull(fd *file) {
 	f.nck(*fd)
 }
 
@@ -556,7 +565,7 @@ func (c *Client) SyncIcon(img image.Image) error {
 	if err != nil {
 		return err
 	}
-	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, uint64(buf.Len()), 0)
 }
 
 func (c *Client) SyncGif(gifImg *gif.GIF) error {
@@ -566,16 +575,20 @@ func (c *Client) SyncGif(gifImg *gif.GIF) error {
 	if err != nil {
 		return err
 	}
-	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, 0, 0)
+	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, uint64(buf.Len()), 0)
 }
 
 func (c *Client) SendVoice(filename string, duration uint64) error {
+	i, err := os.Stat(filename)
+	if err != nil {
+		return err
+	}
 	r, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	return c.SendFile(r, OpSendVoice, filepath.Base(filename), 0, duration)
+	return c.SendFile(r, OpSendVoice, filepath.Base(filename), uint64(i.Size()), duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
