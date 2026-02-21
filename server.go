@@ -365,7 +365,10 @@ func (s *Server) checkUser(UUID string) bool {
 // dispatch may block by slow connection
 func (s *Server) dispatch(addr string, bytes []byte) {
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
-	ack, _ := s.ackMap.Load(addr)
+	ack, ok := s.ackMap.Load(addr)
+	if !ok {
+		return
+	}
 	for i := uint8(0); i < s.Retries; i++ {
 		_, _ = s.conn.WriteTo(bytes, udpAddr)
 		select {
