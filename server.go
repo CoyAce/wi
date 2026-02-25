@@ -1,6 +1,7 @@
 package wi
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net"
@@ -15,7 +16,7 @@ type Server struct {
 	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	addrMap sync.Map      // addr -> Sign
 	uuidMap sync.Map      // uuid -> addr
-	ackMap  sync.Map      // addr -> ack chan
+	ackMap  sync.Map      // addr -> *sync.Map { block -> CancelFunc }
 	*audioManager
 	conn net.PacketConn
 }
@@ -47,11 +48,11 @@ func (s *Server) Serve() error {
 		}
 
 		pkt := buf[:n]
-		go s.relay(pkt, addr, n)
+		go s.relay(pkt, addr)
 	}
 }
 
-func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
+func (s *Server) relay(pkt []byte, addr net.Addr) {
 	var (
 		sign   Sign
 		msg    SignedMessage
@@ -64,22 +65,23 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 	)
 	switch {
 	case ack.Unmarshal(pkt) == nil:
-		ch, ok := s.ackMap.Load(addr.String())
+		m, ok := s.ackMap.Load(addr.String())
 		if !ok {
 			return
 		}
-		select {
-		case ch.(chan struct{}) <- struct{}{}:
-		default:
+		cancel, ok := m.(*sync.Map).Load(ack.Block)
+		if !ok {
+			return
 		}
+		cancel.(context.CancelFunc)()
 	case msg.Unmarshal(pkt) == nil:
 		exist := s.checkUser(msg.Sign.UUID)
 		if !exist {
 			s.reject(addr)
 			return
 		}
-		s.ack(addr, 0)
-		s.handle(msg.Sign, pkt)
+		s.ack(addr, msg.Block)
+		s.handle(msg.Sign, pkt, msg.Block)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
@@ -87,10 +89,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 			return
 		}
 		if w, ok := s.isContent(data.FileId); ok {
-			s.relayToSubscribers(data, *w, pkt, addr, n)
+			s.relayToSubscribers(*w, pkt)
 			return
 		}
-		s.handleFileData(data, pkt, addr, n)
+		s.handleFileData(data, pkt)
 	case sign.Unmarshal(pkt) == nil:
 		s.ack(addr, 0)
 		if s.sameUser(sign.UUID, addr.String()) {
@@ -98,10 +100,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 		}
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), sign)
-		s.ackMap.Store(addr.String(), make(chan struct{}))
+		s.ackMap.Store(addr.String(), &sync.Map{})
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
-		s.ack(addr, 0)
+		s.ack(addr, wrq.Block)
 		audioId := s.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -127,9 +129,9 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 		default:
 			s.addFile(wrq)
 		}
-		s.handle(s.findSignByUUID(wrq.UUID), pkt)
+		s.handle(s.findSignByUUID(wrq.UUID), pkt, wrq.Block)
 	case rrq.Unmarshal(pkt) == nil:
-		s.ack(addr, 0)
+		s.ack(addr, rrq.Block)
 		switch rrq.Code {
 		case OpSubscribe:
 			s.dispatchToPublisher(pkt, rrq)
@@ -138,7 +140,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr, n int) {
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		s.ack(addr, 0)
+		s.ack(addr, nck.Block)
 		s.handleNck(pkt, nck)
 	case unsign.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
@@ -160,10 +162,7 @@ func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
 	return &w, w.Code == OpContent
 }
 
-func (s *Server) relayToSubscribers(data Data, wrq WriteReq, pkt []byte, sender net.Addr, n int) {
-	if s.isFinalPacket(n) {
-		s.ack(sender, data.Block)
-	}
+func (s *Server) relayToSubscribers(wrq WriteReq, pkt []byte) {
 	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
 	if !ok {
 		return
@@ -183,7 +182,7 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go s.dispatch(s.findAddrByUUID(k.(string)), pkt)
+		go s.dispatch(s.findAddrByUUID(k.(string)), pkt, wrq.Block)
 		return true
 	})
 }
@@ -196,7 +195,7 @@ func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 		s.pubMap.Store(pair, subs)
 	}
 	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
-	go s.dispatch(s.findAddrByUUID(rrq.Publisher), pkt)
+	go s.dispatch(s.findAddrByUUID(rrq.Publisher), pkt, rrq.Block)
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
@@ -215,7 +214,7 @@ func (s *Server) reject(addr net.Addr) {
 
 func (s *Server) handleNck(pkt []byte, nck Nck) {
 	sign := s.findSignByFileId(nck.FileId)
-	go s.dispatch(s.findAddrByUUID(sign.UUID), pkt)
+	go s.dispatch(s.findAddrByUUID(sign.UUID), pkt, nck.Block)
 }
 
 func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
@@ -263,17 +262,9 @@ func (s *Server) handleStreamData(data Data, pkt []byte, sender net.Addr) {
 	})
 }
 
-func (s *Server) handleFileData(data Data, pkt []byte, sender net.Addr, n int) {
+func (s *Server) handleFileData(data Data, pkt []byte) {
 	sign := s.findSignByFileId(data.FileId)
-	if s.isFinalPacket(n) {
-		s.ack(sender, data.Block)
-		s.handle(sign, pkt)
-		time.AfterFunc(5*time.Minute, func() {
-			s.fileMap.Delete(data.FileId)
-		})
-	} else {
-		s.directRelay(sign, pkt)
-	}
+	s.directRelay(sign, pkt)
 }
 
 func (s *Server) isFinalPacket(n int) bool {
@@ -347,11 +338,11 @@ func (s *Server) ack(addr net.Addr, block uint32) {
 	}
 }
 
-func (s *Server) handle(sign Sign, bytes []byte) {
+func (s *Server) handle(sign Sign, bytes []byte, block uint32) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
-			go s.dispatch(key.(string), bytes)
+			go s.dispatch(key.(string), bytes, block)
 		}
 		return true
 	})
@@ -363,16 +354,21 @@ func (s *Server) checkUser(UUID string) bool {
 }
 
 // dispatch may block by slow connection
-func (s *Server) dispatch(addr string, bytes []byte) {
-	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
+func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 	ack, ok := s.ackMap.Load(addr)
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ack.(*sync.Map).Store(block, cancel)
+	defer ack.(*sync.Map).Delete(block)
+	defer cancel()
+
+	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	for i := uint8(0); i < s.Retries; i++ {
 		_, _ = s.conn.WriteTo(bytes, udpAddr)
 		select {
-		case <-ack.(chan struct{}):
+		case <-ctx.Done():
 			return
 		case <-time.After(s.Timeout):
 		}

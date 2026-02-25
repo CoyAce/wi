@@ -855,19 +855,19 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case ack.Unmarshal(buf) == nil:
 		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
-		c.ack(addr, 0)
+		c.ack(addr, msg.Block)
 		s := string(msg.Payload)
 		log.Printf("Receiving text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
-		c.ack(addr, 0)
+		c.ack(addr, rrq.Block)
 		switch rrq.Code {
 		case OpSubscribe:
 			c.SubMessages <- rrq
 		default:
 		}
 	case wrq.Unmarshal(buf) == nil:
-		c.ack(addr, 0)
+		c.ack(addr, wrq.Block)
 		audioId := c.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -910,7 +910,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.fileData <- data
 		}
 	case nck.Unmarshal(buf) == nil:
-		c.ack(addr, 0)
+		c.ack(addr, nck.Block)
 		log.Printf("nck received")
 		if c.fileReader.isPull(nck.FileId) {
 			c.req <- nck

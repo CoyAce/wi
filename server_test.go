@@ -27,7 +27,7 @@ func TestMsgMarshal(t *testing.T) {
 	sign := "default"
 	uuid := "mock#00001"
 	s := Sign{Sign: sign, UUID: uuid}
-	msg := SignedMessage{s, []byte("hello")}
+	msg := SignedMessage{0, s, []byte("hello")}
 	pkt, _ := msg.Marshal()
 	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
 }
@@ -54,7 +54,7 @@ func TestListenPacketUDP(t *testing.T) {
 	clientMsgPkt, err := clientMsg.Marshal()
 
 	textA := "beautiful world"
-	clientAMsg := SignedMessage{Sign: clientASign, Payload: []byte(textA)}
+	clientAMsg := SignedMessage{Block: 1, Sign: clientASign, Payload: []byte(textA)}
 	clientAMsgPkt, err := clientAMsg.Marshal()
 
 	s, serverAddr := setUpServer(t)

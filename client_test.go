@@ -44,11 +44,11 @@ func TestFileContentRangeMergeAndExclude(t *testing.T) {
 		t.Errorf("pending should have been completed")
 	}
 	fc.add([]Range{{50, 100}})
-	if len(fc.reading.ranges) > 1 || len(fc.reading.ranges) == 0 {
+	if len(fc.reading.ranges) != 1 {
 		t.Errorf("ranges should have been excluded")
 	}
 	fc.add([]Range{{60, 80}})
-	if len(fc.reading.ranges) > 1 || len(fc.reading.ranges) > 1 {
+	if len(fc.reading.ranges) != 1 {
 		t.Errorf("ranges should have been excluded")
 	}
 	fc.add([]Range{{80, 120}})
