@@ -147,12 +147,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		s.ack(addr, nck.Block)
 		sn := s.findSignByFileId(nck.FileId)
 		if s.userNotExist(sn.UUID) {
 			s.reject(addr)
 			return
 		}
+		s.ack(addr, nck.Block)
 		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, nck.Block)
 	case unsign.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
@@ -217,6 +217,7 @@ func (s *Server) deleteSub(rrq ReadReq) {
 }
 
 func (s *Server) reject(addr net.Addr) {
+	log.Printf("reject %v", addr.String())
 	err := ErrUnknownUser
 	p, _ := err.Marshal()
 	_, _ = s.conn.WriteTo(p, addr)
