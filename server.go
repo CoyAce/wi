@@ -378,5 +378,5 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 		case <-time.After(s.Timeout):
 		}
 	}
-	log.Printf("[%s] write timeout after %d retries", addr, s.Retries)
+	log.Printf("[%s] write timeout after %d retries, type %v", addr, s.Retries, bytes[:2])
 }
