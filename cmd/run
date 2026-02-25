@@ -1,0 +1,4 @@
+#!/bin/bash
+pid=$(ps aux | grep cmd | grep -v grep | head -1 | awk '{print $2}')
+kill $pid
+nohup ./cmd > log &
