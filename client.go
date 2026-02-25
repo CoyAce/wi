@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -388,6 +389,12 @@ type messages struct {
 	MessageCounter uint32             // the number of sent messages
 	Retries        uint8              // the number of times to retry a failed transmission
 	Timeout        time.Duration      // the duration to wait for an acknowledgement
+	id             uint32             // global message id
+}
+
+func (m *messages) nextID() uint32 {
+	atomic.AddUint32(&m.id, 1)
+	return m.id
 }
 
 func newMessages() messages {
@@ -461,7 +468,7 @@ func newFileMetaInfo(
 }
 
 type audioManager struct {
-	audioMap      sync.Map  // audio maker
+	audioMap      sync.Map  // audio maker, fileId -> WriteReq
 	audioReceiver sync.Map  // audio receiver, fileId -> *sync.Map { UUID -> WriteReq }
 	AudioData     chan Data `json:"-"`
 }
@@ -578,7 +585,7 @@ func (c *Client) SyncGif(gifImg *gif.GIF) error {
 	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, uint64(buf.Len()), 0)
 }
 
-func (c *Client) SendVoice(filename string, duration uint64) error {
+func (c *Client) SendVoice(filename string, duration uint32) error {
 	i, err := os.Stat(filename)
 	if err != nil {
 		return err
@@ -605,16 +612,18 @@ func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) e
 }
 
 func (c *Client) MakeAudioCall(fileId uint32) error {
-	c.addAudioStream(WriteReq{Code: OpAudioCall, FileId: fileId, UUID: c.FullID()})
-	return c.send(c.newAudioReq(OpAudioCall, fileId))
+	req := c.newAudioReq(OpAudioCall, fileId)
+	c.addAudioStream(*req)
+	return c.send(req)
 }
 
 func (c *Client) EndAudioCall(fileId uint32) error {
 	audioId := GetHigh16(fileId)
 	c.deleteAudioReceiver(audioId, c.FullID())
 	c.cleanup(audioId)
-	c.FileMessages <- WriteReq{Code: OpEndAudioCall, FileId: fileId, UUID: c.FullID()}
-	return c.send(c.newAudioReq(OpEndAudioCall, fileId))
+	req := c.newAudioReq(OpEndAudioCall, fileId)
+	c.FileMessages <- *req
+	return c.send(req)
 }
 
 func (c *Client) AcceptAudioCall(fileId uint32) error {
@@ -622,7 +631,7 @@ func (c *Client) AcceptAudioCall(fileId uint32) error {
 }
 
 func (c *Client) newAudioReq(code OpCode, fileId uint32) *WriteReq {
-	return &WriteReq{Code: code, FileId: fileId, UUID: c.FullID()}
+	return &WriteReq{Code: code, Block: c.nextID(), FileId: fileId, UUID: c.FullID()}
 }
 
 func (c *Client) send(req Req) error {
@@ -635,7 +644,7 @@ func (c *Client) send(req Req) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.sendPacket(conn, pkt, 0)
+	_, err = c.sendPacket(conn, pkt, req.ID())
 	if err != nil {
 		return err
 	}
@@ -643,33 +652,33 @@ func (c *Client) send(req Req) error {
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
-	return c.send(&WriteReq{Code: OpPublish, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
+	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
 func (c *Client) PublishContent(name string, size uint64, id uint32, content io.ReadSeekCloser) error {
 	if c.contents[id] == nil {
 		c.contents[id] = &fileContent{fileId: id, content: content}
 	}
-	return c.send(&WriteReq{Code: OpContent, FileId: id, Filename: name, Size: size, UUID: c.FullID()})
+	return c.send(&WriteReq{Code: OpContent, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
 func (c *Client) SubscribeFile(id uint32, sender string, update func(p int, s int)) error {
 	c.updaters[id] = &updater{update: update}
-	return c.send(&ReadReq{Code: OpSubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
+	return c.send(&ReadReq{Code: OpSubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
 func (c *Client) UnsubscribeFile(id uint32, sender string) error {
 	// clean OpContent wrq after finished download
 	c.clean(id)
-	return c.send(&ReadReq{Code: OpUnsubscribe, FileId: id, Publisher: sender, Subscriber: c.FullID()})
+	return c.send(&ReadReq{Code: OpUnsubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
 func (c *Client) SendFile(reader io.Reader, code OpCode,
-	filename string, size uint64, duration uint64) error {
+	filename string, size uint64, duration uint32) error {
 	hash := Hash(unsafe.Pointer(&reader))
 	log.Printf("file id: %v", hash)
 
-	wrq := WriteReq{Code: code, FileId: hash, UUID: c.FullID(),
+	wrq := WriteReq{Code: code, Block: c.nextID(), FileId: hash, UUID: c.FullID(),
 		Filename: filename, Size: size, Duration: duration}
 	err := c.send(&wrq)
 	if err != nil {
@@ -708,7 +717,7 @@ func (c *Client) sendData(data Data) error {
 
 func (c *Client) opReady(id uint32) error {
 	log.Printf("send OpReady")
-	return c.send(&WriteReq{Code: OpReady, FileId: id, UUID: c.FullID()})
+	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, UUID: c.FullID()})
 }
 
 func (c *Client) writeOnce(data Data) error {
@@ -730,14 +739,14 @@ func (c *Client) SendText(text string) error {
 	}
 	defer func() { _ = conn.Close() }()
 
-	msg := SignedMessage{Sign: Sign{c.Sign, c.FullID()}, Payload: []byte(text)}
+	msg := SignedMessage{Block: c.nextID(), Sign: Sign{c.Sign, c.FullID()}, Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
 
 	c.MessageCounter++
-	_, err = c.sendPacket(conn, pkt, 0)
+	_, err = c.sendPacket(conn, pkt, msg.Block)
 	return err
 }
 
@@ -933,7 +942,7 @@ func (c *Client) ack(addr net.Addr, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	nck := Nck{FileId: f.req.FileId, ranges: f.rt.GetRanges()}
+	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.rt.GetRanges()}
 	err := c.send(&nck)
 	if err != nil {
 		log.Printf("send nck failed: %v", err)
@@ -988,7 +997,7 @@ RETRY:
 
 		switch {
 		case ackPkt.Unmarshal(buf[:n]) == nil:
-			if block == 0 || ackPkt.Block == block {
+			if ackPkt.Block == block {
 				return n, nil
 			}
 		case ec.Unmarshal(buf) == nil:

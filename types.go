@@ -76,24 +76,30 @@ func (op *OpCode) Unmarshal(p []byte) error {
 
 	err := binary.Read(b, binary.BigEndian, &code) // read operation code
 	if err != nil || code != *op {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 	return nil
 }
 
 type Req interface {
 	Marshal() ([]byte, error)
+	ID() uint32
 }
 
 type ReadReq struct {
 	Code       OpCode
+	Block      uint32
 	FileId     uint32
 	Publisher  string
 	Subscriber string
 }
 
+func (r *ReadReq) ID() uint32 {
+	return r.Block
+}
+
 func (r *ReadReq) Marshal() ([]byte, error) {
-	size := 2 + 4 + len(r.Publisher) + 1 + len(r.Subscriber) + 1
+	size := 2 + 4 + 4 + len(r.Publisher) + 1 + len(r.Subscriber) + 1
 	b := new(bytes.Buffer)
 	b.Grow(size)
 
@@ -102,6 +108,11 @@ func (r *ReadReq) Marshal() ([]byte, error) {
 	}
 
 	err := binary.Write(b, binary.BigEndian, r.Code) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, r.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -133,22 +144,27 @@ func (r *ReadReq) Unmarshal(p []byte) error {
 	}
 
 	if !rrqSet[r.Code] {
-		return errors.New("invalid RRQ")
+		return INVALID_RRQ
+	}
+
+	err = binary.Read(b, binary.BigEndian, &r.Block) // read block number
+	if err != nil {
+		return INVALID_RRQ
 	}
 
 	err = binary.Read(b, binary.BigEndian, &r.FileId) // read file id
 	if err != nil {
-		return errors.New("invalid RRQ")
+		return INVALID_RRQ
 	}
 
 	r.Publisher, err = readString(b)
 	if err != nil {
-		return errors.New("invalid RRQ")
+		return INVALID_RRQ
 	}
 
 	r.Subscriber, err = readString(b)
 	if err != nil {
-		return errors.New("invalid RRQ")
+		return INVALID_RRQ
 	}
 
 	return nil
@@ -161,15 +177,20 @@ type FilePair struct {
 
 type WriteReq struct {
 	Code     OpCode
+	Block    uint32
 	FileId   uint32
 	UUID     string
 	Filename string
 	Size     uint64
-	Duration uint64
+	Duration uint32
+}
+
+func (q *WriteReq) ID() uint32 {
+	return q.Block
 }
 
 func (q *WriteReq) Marshal() ([]byte, error) {
-	size := 2 + 4 + len(q.UUID) + 1 + len(q.Filename) + 1 + 8 + 8
+	size := 2 + 4 + 4 + len(q.UUID) + 1 + len(q.Filename) + 1 + 8 + 4
 	b := new(bytes.Buffer)
 	b.Grow(size)
 
@@ -178,6 +199,11 @@ func (q *WriteReq) Marshal() ([]byte, error) {
 	}
 
 	err := binary.Write(b, binary.BigEndian, q.Code) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, q.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +245,11 @@ func (q *WriteReq) Unmarshal(p []byte) error {
 	}
 
 	if !wrqSet[q.Code] {
+		return errors.New("invalid WRQ")
+	}
+
+	err = binary.Read(r, binary.BigEndian, &q.Block) // read block number
+	if err != nil {
 		return errors.New("invalid WRQ")
 	}
 
@@ -288,19 +319,19 @@ func (d *Data) Marshal() ([]byte, error) {
 
 func (d *Data) Unmarshal(p []byte) error {
 	if l := len(p); l < 10 || l > DatagramSize {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	var code OpCode
 
 	err := binary.Read(bytes.NewReader(p[:2]), binary.BigEndian, &code) // read operation code
 	if err != nil || code != OpData {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	err = binary.Read(bytes.NewReader(p[2:6]), binary.BigEndian, &d.FileId) // read file id
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	err = binary.Read(bytes.NewReader(p[6:10]), binary.BigEndian, &d.Block) // read block number
@@ -342,28 +373,29 @@ func (sign *Sign) Unmarshal(p []byte) error {
 	var opcode OpCode
 	err := binary.Read(r, binary.BigEndian, &opcode)
 	if err != nil || opcode != OpSign {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	sign.Sign, err = readString(r) // read sign
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	sign.UUID, err = readString(r) // read UUID
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 	return nil
 }
 
 type SignedMessage struct {
+	Block   uint32
 	Sign    Sign
 	Payload []byte
 }
 
 func (m *SignedMessage) Marshal() ([]byte, error) {
-	size := 2 + len(m.Sign.Sign) + 1 + len(m.Sign.UUID) + 1 + len(m.Payload)
+	size := 2 + 4 + len(m.Sign.Sign) + 1 + len(m.Sign.UUID) + 1 + len(m.Payload)
 	if size > DatagramSize {
 		return nil, errors.New("packet is greater than DatagramSize")
 	}
@@ -371,6 +403,11 @@ func (m *SignedMessage) Marshal() ([]byte, error) {
 	b.Grow(size)
 
 	err := binary.Write(b, binary.BigEndian, OpSignedMSG) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, m.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -386,24 +423,29 @@ func (m *SignedMessage) Marshal() ([]byte, error) {
 }
 
 func (m *SignedMessage) Unmarshal(p []byte) error {
-	if l := len(p); l < 4 || l > DatagramSize {
-		return errors.New("invalid DATA")
+	if l := len(p); l < 8 || l > DatagramSize {
+		return InvalidData
 	}
 	r := bytes.NewBuffer(p)
 	var opcode OpCode
 	err := binary.Read(r, binary.BigEndian, &opcode)
 	if err != nil || opcode != OpSignedMSG {
-		return errors.New("invalid DATA")
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &m.Block) // read block number
+	if err != nil {
+		return InvalidData
 	}
 
 	m.Sign.Sign, err = readString(r)
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	m.Sign.UUID, err = readString(r)
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	m.Payload = r.Bytes()
@@ -439,11 +481,11 @@ func (a *Ack) Unmarshal(p []byte) error {
 
 	err := binary.Read(r, binary.BigEndian, &code) // read operation code
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	if code != OpAck {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	return binary.Read(r, binary.BigEndian, &a.Block) // read block number
@@ -458,7 +500,7 @@ const (
 )
 
 func (e *ErrCode) Marshal() ([]byte, error) {
-	size := 2 + 2
+	const size = 2 + 2
 	b := new(bytes.Buffer)
 	b.Grow(size)
 
@@ -486,7 +528,7 @@ func (e *ErrCode) Unmarshal(p []byte) error {
 	}
 
 	if code != OpErr {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	err = binary.Read(r, binary.BigEndian, e) // read error code
@@ -498,22 +540,33 @@ func (e *ErrCode) Unmarshal(p []byte) error {
 }
 
 type Nck struct {
+	Block  uint32
 	FileId uint32
 	ranges []Range
 }
 
+func (n *Nck) ID() uint32 {
+	return n.Block
+}
+
 func (n *Nck) Marshal() ([]byte, error) {
-	// operation code + fileId  + ranges count + len(ranges) * 4
-	size := 2 + 4 + 1 + len(n.ranges)*8
+	// operation code + Block + fileId  + ranges count + len(ranges) * 4
+	const baseSize = 2 + 4 + 4 + 1
+	size := baseSize + len(n.ranges)*8
 	b := new(bytes.Buffer)
 	if size > DatagramSize {
-		m := BlockSize / 8
+		m := (DatagramSize - baseSize) / 8
 		n.ranges = n.ranges[:m]
 		size = DatagramSize
 	}
 	b.Grow(size)
 
 	err := binary.Write(b, binary.BigEndian, uint16(OpNck)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, n.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -545,28 +598,33 @@ func (n *Nck) Unmarshal(p []byte) error {
 
 	err := binary.Read(r, binary.BigEndian, &code) // read operation code
 	if err != nil {
-		return err
+		return InvalidData
 	}
 
 	if code != OpNck {
-		return errors.New("invalid DATA")
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &n.Block) // read block id
+	if err != nil {
+		return InvalidData
 	}
 
 	err = binary.Read(r, binary.BigEndian, &n.FileId) // read file id
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	err = binary.Read(r, binary.BigEndian, &l) // read ranges count
 	if err != nil {
-		return errors.New("invalid DATA")
+		return InvalidData
 	}
 
 	n.ranges = make([]Range, 0, l)
 	for i := 0; i < int(l); i++ {
 		err = rg.Unmarshal(r)
 		if err != nil {
-			return errors.New("invalid DATA")
+			return InvalidData
 		}
 		n.ranges = append(n.ranges, rg)
 	}
@@ -624,3 +682,8 @@ func (r *Range) startWithin(v Range) bool {
 func (r *Range) Within(v uint32) bool {
 	return v >= r.start && v <= r.end
 }
+
+var (
+	InvalidData = errors.New("invalid DATA")
+	INVALID_RRQ = errors.New("invalid RRQ")
+)
