@@ -65,6 +65,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	)
 	switch {
 	case ack.Unmarshal(pkt) == nil:
+		log.Printf("ack received, block: %v", ack.Block)
 		m, ok := s.ackMap.Load(addr.String())
 		if !ok {
 			return
