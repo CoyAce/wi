@@ -75,8 +75,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		cancel.(context.CancelFunc)()
 	case msg.Unmarshal(pkt) == nil:
-		exist := s.checkUser(msg.Sign.UUID)
-		if !exist {
+		if s.userNotExist(msg.Sign.UUID) {
 			s.reject(addr)
 			return
 		}
@@ -103,6 +102,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		s.ackMap.Store(addr.String(), &sync.Map{})
 		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
+		if s.userNotExist(wrq.UUID) {
+			s.reject(addr)
+			return
+		}
 		s.ack(addr, wrq.Block)
 		audioId := s.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
@@ -131,6 +134,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		s.handle(s.findSignByUUID(wrq.UUID), pkt, wrq.Block)
 	case rrq.Unmarshal(pkt) == nil:
+		if s.userNotExist(rrq.Subscriber) {
+			s.reject(addr)
+			return
+		}
 		s.ack(addr, rrq.Block)
 		switch rrq.Code {
 		case OpSubscribe:
@@ -141,16 +148,19 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 	case nck.Unmarshal(pkt) == nil:
 		s.ack(addr, nck.Block)
-		s.handleNck(pkt, nck)
+		sn := s.findSignByFileId(nck.FileId)
+		if s.userNotExist(sn.UUID) {
+			s.reject(addr)
+			return
+		}
+		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, nck.Block)
 	case unsign.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
 	}
 }
 
 func (s *Server) sameUser(UUID string, addr string) bool {
-	exist := s.checkUser(UUID)
-	sameAddr := addr == s.findAddrByUUID(UUID)
-	return exist && sameAddr
+	return addr == s.findAddrByUUID(UUID)
 }
 
 func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
@@ -210,11 +220,6 @@ func (s *Server) reject(addr net.Addr) {
 	err := ErrUnknownUser
 	p, _ := err.Marshal()
 	_, _ = s.conn.WriteTo(p, addr)
-}
-
-func (s *Server) handleNck(pkt []byte, nck Nck) {
-	sign := s.findSignByFileId(nck.FileId)
-	go s.dispatch(s.findAddrByUUID(sign.UUID), pkt, nck.Block)
 }
 
 func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
@@ -348,9 +353,9 @@ func (s *Server) handle(sign Sign, bytes []byte, block uint32) {
 	})
 }
 
-func (s *Server) checkUser(UUID string) bool {
+func (s *Server) userNotExist(UUID string) bool {
 	_, ok := s.uuidMap.Load(UUID)
-	return ok
+	return !ok
 }
 
 // dispatch may block by slow connection
