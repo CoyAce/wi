@@ -244,7 +244,6 @@ func (s *Server) removeByAddr(addr string) {
 	if ok {
 		s.addrMap.Delete(addr)
 		s.uuidMap.Delete(sign.(Sign).UUID)
-		s.ackMap.Delete(addr)
 	}
 }
 
