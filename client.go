@@ -2,6 +2,7 @@ package wi
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image"
 	"image/gif"
@@ -390,6 +391,8 @@ type messages struct {
 	Retries        uint8              // the number of times to retry a failed transmission
 	Timeout        time.Duration      // the duration to wait for an acknowledgement
 	id             uint32             // global message id
+	ackMap         sync.Map           // block -> context.CancelFunc
+	retryMap       sync.Map           // block -> context.CancelFunc
 }
 
 func (m *messages) nextID() uint32 {
@@ -635,16 +638,11 @@ func (c *Client) newAudioReq(code OpCode, fileId uint32) *WriteReq {
 }
 
 func (c *Client) send(req Req) error {
-	conn, err := net.Dial("udp", c.ServerAddr)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
 	pkt, err := req.Marshal()
 	if err != nil {
 		return err
 	}
-	_, err = c.sendPacket(conn, pkt, req.ID())
+	err = c.sendPacket(pkt, req.ID())
 	if err != nil {
 		return err
 	}
@@ -733,21 +731,14 @@ func (c *Client) writeOnce(data Data) error {
 }
 
 func (c *Client) SendText(text string) error {
-	conn, err := net.Dial("udp", c.ServerAddr)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close() }()
-
-	msg := SignedMessage{Block: c.nextID(), Sign: Sign{c.Sign, c.FullID()}, Payload: []byte(text)}
+	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.FullID()}, Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
 
 	c.MessageCounter++
-	_, err = c.sendPacket(conn, pkt, msg.Block)
-	return err
+	return c.sendPacket(pkt, msg.Sign.Block)
 }
 
 func (c *Client) ListenAndServe(addr string) {
@@ -796,14 +787,19 @@ func (c *Client) init() {
 }
 
 func (c *Client) SendSign() {
-	sign := Sign{c.Sign, c.FullID()}
+	sign := Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.FullID()}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
+	err = c.sendPacket(pkt, sign.Block)
 	if err != nil {
-		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
+		log.Printf("[%s] send failed: %v", c.Sign, err)
+	} else {
+		c.retryMap.Range(func(k, v interface{}) bool {
+			v.(context.CancelFunc)()
+			return true
+		})
 	}
 }
 
@@ -853,6 +849,11 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
+		cancel, ok := c.ackMap.Load(ack.Block)
+		if !ok {
+			return
+		}
+		cancel.(context.CancelFunc)()
 		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.Block)
@@ -963,52 +964,27 @@ func (c *Client) SetServerAddr(addr string) {
 	c.SAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) sendPacket(conn net.Conn, bytes []byte, block uint32) (int, error) {
-	var (
-		ackPkt Ack
-		ec     ErrCode
-		buf    = make([]byte, DatagramSize)
-	)
-RETRY:
+func (c *Client) sendPacket(bytes []byte, block uint32) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	retry, trigger := context.WithCancel(context.Background())
+	c.ackMap.Store(block, cancel)
+	c.retryMap.Store(block, trigger)
+	defer c.ackMap.Delete(block)
+	defer cancel()
+	defer c.retryMap.Delete(block)
+	defer trigger()
 	for i := c.Retries; i > 0; i-- {
-		_, err := conn.Write(bytes)
-		if err != nil {
-			log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-			return 0, err
-		}
-
-		// wait for the Server's ACK packet
-		_ = conn.SetReadDeadline(time.Now().Add(c.Timeout))
-		n, err := conn.Read(buf)
-
-		if err != nil {
-			if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
-				log.Printf("waiting for ACK timeout")
-				continue RETRY
-			}
-			if errors.Is(err, syscall.ECONNREFUSED) {
-				c.Connected = false
-				log.Printf("[%s] connection refused", c.ServerAddr)
-				return 0, err
-			}
-			log.Printf("[%s] waiting for ACK: %v", c.ServerAddr, err)
-			continue
-		}
-
-		switch {
-		case ackPkt.Unmarshal(buf[:n]) == nil:
-			if ackPkt.Block == block {
-				return n, nil
-			}
-		case ec.Unmarshal(buf) == nil:
-			if ec == ErrUnknownUser {
-				c.SendSign()
-			}
-		default:
-			log.Printf("[%s] bad packet", c.ServerAddr)
+		_, _ = c.conn.WriteTo(bytes, c.SAddr)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(c.Timeout):
+		case <-retry.Done():
+			retry, trigger = context.WithCancel(context.Background())
+			c.retryMap.Store(block, trigger)
 		}
 	}
-	return 0, errors.New("exhausted retries")
+	return errors.New("exhausted retries")
 }
 
 var DefaultClient *Client

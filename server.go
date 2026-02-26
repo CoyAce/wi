@@ -93,14 +93,14 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		s.handleFileData(data, pkt)
 	case sign.Unmarshal(pkt) == nil:
-		s.ack(addr, 0)
+		s.ack(addr, sign.Block)
 		if s.sameUser(sign.UUID, addr.String()) {
 			return
 		}
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), sign)
 		s.ackMap.Store(addr.String(), &sync.Map{})
-		log.Printf("[%s] set sign: [%s]", addr.String(), sign)
+		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
 		if s.userNotExist(wrq.UUID) {
 			s.reject(addr)

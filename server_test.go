@@ -27,7 +27,7 @@ func TestMsgMarshal(t *testing.T) {
 	sign := "default"
 	uuid := "mock#00001"
 	s := Sign{Sign: sign, UUID: uuid}
-	msg := SignedMessage{0, s, []byte("hello")}
+	msg := SignedMessage{s, []byte("hello")}
 	pkt, _ := msg.Marshal()
 	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
 }
@@ -42,20 +42,17 @@ func TestListenPacketUDP(t *testing.T) {
 	sign := "test"
 
 	uuid := "#00001"
-	clientSign := Sign{sign, uuid}
+	clientSign := Sign{0, sign, uuid}
 	clientSignPkt, _ := clientSign.Marshal()
 	t.Logf("sign pkt: [%v]", hex.EncodeToString(clientSignPkt))
 
 	uuidA := "#00002"
-	clientASign := Sign{sign, uuidA}
 
 	text := "hello beautiful world"
 	clientMsg := SignedMessage{Sign: clientSign, Payload: []byte(text)}
 	clientMsgPkt, err := clientMsg.Marshal()
 
 	textA := "beautiful world"
-	clientAMsg := SignedMessage{Block: 1, Sign: clientASign, Payload: []byte(textA)}
-	clientAMsgPkt, err := clientAMsg.Marshal()
 
 	s, serverAddr := setUpServer(t)
 	client, err := setUpClient(t)
@@ -99,8 +96,16 @@ func TestListenPacketUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(clientAMsgPkt, buf[:n]) {
-		t.Errorf("expected reply %q; actual reply %q", clientAMsgPkt, buf[:n])
+	var m SignedMessage
+	err = m.Unmarshal(buf[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(m.Payload) != textA {
+		t.Errorf("expected %q; actual reply %q", textA, string(m.Payload))
+	}
+	if m.UUID != uuidA {
+		t.Errorf("expected %q; actual reply %q", uuidA, string(m.Payload))
 	}
 	// send ack
 	client.WriteTo(msgAckBytes, sAddr)
@@ -230,6 +235,22 @@ func TestUnknownUser(t *testing.T) {
 	text = string(msg.Payload)
 	if text != "hello" {
 		t.Errorf("expected \"hello\"; actual %q", text)
+	}
+}
+
+func TestSignedMessage(t *testing.T) {
+	msg := SignedMessage{Sign: Sign{Block: 1, Sign: "default", UUID: "test"}, Payload: []byte("hello")}
+	pkt, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m SignedMessage
+	err = m.Unmarshal(pkt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(msg, m) {
+		t.Errorf("expected %v; actual %v", msg, m)
 	}
 }
 

@@ -342,15 +342,21 @@ func (d *Data) Unmarshal(p []byte) error {
 }
 
 type Sign struct {
-	Sign string
-	UUID string
+	Block uint32
+	Sign  string
+	UUID  string
 }
 
 func (sign *Sign) Marshal() ([]byte, error) {
 	b := new(bytes.Buffer)
-	b.Grow(2 + len(sign.Sign) + 1 + len(sign.UUID) + 1)
+	b.Grow(2 + 4 + len(sign.Sign) + 1 + len(sign.UUID) + 1)
 
 	err := binary.Write(b, binary.BigEndian, OpSign) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, sign.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -376,6 +382,11 @@ func (sign *Sign) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
+	err = binary.Read(r, binary.BigEndian, &sign.Block)
+	if err != nil {
+		return InvalidData
+	}
+
 	sign.Sign, err = readString(r) // read sign
 	if err != nil {
 		return InvalidData
@@ -389,13 +400,12 @@ func (sign *Sign) Unmarshal(p []byte) error {
 }
 
 type SignedMessage struct {
-	Block   uint32
-	Sign    Sign
+	Sign
 	Payload []byte
 }
 
 func (m *SignedMessage) Marshal() ([]byte, error) {
-	size := 2 + 4 + len(m.Sign.Sign) + 1 + len(m.Sign.UUID) + 1 + len(m.Payload)
+	size := 2 + len(m.Sign.Sign) + 1 + len(m.Sign.UUID) + 1 + len(m.Payload)
 	if size > DatagramSize {
 		return nil, errors.New("packet is greater than DatagramSize")
 	}
@@ -403,11 +413,6 @@ func (m *SignedMessage) Marshal() ([]byte, error) {
 	b.Grow(size)
 
 	err := binary.Write(b, binary.BigEndian, OpSignedMSG) // write operation code
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(b, binary.BigEndian, m.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +438,7 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	err = binary.Read(r, binary.BigEndian, &m.Block) // read block number
+	err = binary.Read(r, binary.BigEndian, &m.Block)
 	if err != nil {
 		return InvalidData
 	}
