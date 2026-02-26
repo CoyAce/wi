@@ -373,7 +373,7 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	for i := uint8(0); i < s.Retries; i++ {
-		log.Printf("send packet: %v", block)
+		log.Printf("send packet: %v to %v", block, addr)
 		_, _ = s.conn.WriteTo(bytes, udpAddr)
 		select {
 		case <-ctx.Done():
