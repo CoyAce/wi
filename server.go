@@ -68,8 +68,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		log.Printf("ack received: %v", ack.Block)
 		m, ok := s.ackMap.Load(addr.String())
 		if !ok {
-			sn, _ := s.addrMap.Load(addr.String())
-			log.Printf("unknown ack: %v, uuid: %v", ack.Block, sn.(*Sign).UUID)
+			log.Printf("unknown ack: %v, addr: %v", ack.Block, addr.String())
 			return
 		}
 		cancel, ok := m.(*sync.Map).Load(ack.Block)

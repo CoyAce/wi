@@ -411,9 +411,8 @@ func newMessages() messages {
 }
 
 type connManager struct {
-	SAddr     net.Addr `json:"-"`
-	Connected bool     `json:"-"`
-	conn      net.PacketConn
+	SAddr net.Addr `json:"-"`
+	conn  net.PacketConn
 }
 
 type fileManager struct {
@@ -642,7 +641,7 @@ func (c *Client) send(req Req) error {
 	if err != nil {
 		return err
 	}
-	err = c.sendPacket(pkt, req.ID())
+	err = c.write(pkt, req.ID())
 	if err != nil {
 		return err
 	}
@@ -738,7 +737,7 @@ func (c *Client) SendText(text string) error {
 	}
 
 	c.MessageCounter++
-	return c.sendPacket(pkt, msg.Sign.Block)
+	return c.write(pkt, msg.Sign.Block)
 }
 
 func (c *Client) ListenAndServe(addr string) {
@@ -786,13 +785,27 @@ func (c *Client) init() {
 	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.writeOnce, c.FileMessages)
 }
 
+// SendSign try to write sign to server
 func (c *Client) SendSign() {
+	sign := Sign{c.nextID(), c.Sign, c.FullID()}
+	pkt, err := sign.Marshal()
+	if err != nil {
+		log.Printf("[%s] marshal failed: %v", c.Sign, err)
+	}
+	_, err = c.conn.WriteTo(pkt, c.SAddr)
+	if err != nil {
+		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
+		return
+	}
+}
+
+func (c *Client) SignIn() {
 	sign := Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.FullID()}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
 	}
-	err = c.sendPacket(pkt, sign.Block)
+	err = c.write(pkt, sign.Block)
 	if err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
 	} else {
@@ -827,7 +840,6 @@ func (c *Client) serve() {
 				//log.Printf("receive text timeout")
 			}
 			if errors.Is(err, syscall.ECONNREFUSED) {
-				c.Connected = false
 				log.Printf("[%s] connection refused", c.ServerAddr)
 			}
 			//log.Printf("[%s] receive text: %v", c.ServerAddr, err)
@@ -856,7 +868,6 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			return
 		}
 		cancel.(context.CancelFunc)()
-		c.Connected = true
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.Block)
 		s := string(msg.Payload)
@@ -930,7 +941,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		_ = c.opReady(nck.FileId)
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
-			c.SendSign()
+			c.SignIn()
 		}
 	}
 }
@@ -966,7 +977,7 @@ func (c *Client) SetServerAddr(addr string) {
 	c.SAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) sendPacket(bytes []byte, block uint32) error {
+func (c *Client) write(bytes []byte, block uint32) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	retry, trigger := context.WithCancel(context.Background())
 	c.ackMap.Store(block, cancel)
@@ -976,7 +987,7 @@ func (c *Client) sendPacket(bytes []byte, block uint32) error {
 	defer c.retryMap.Delete(block)
 	defer trigger()
 	for i := c.Retries; i > 0; i-- {
-		log.Printf("send packet: %v", block)
+		log.Printf("send packet: %v, type: %v", block, bytes[:2])
 		_, _ = c.conn.WriteTo(bytes, c.SAddr)
 		select {
 		case <-ctx.Done():
