@@ -711,7 +711,7 @@ func (c *Client) sendData(data Data) error {
 	if err != nil {
 		return err
 	}
-	c.cleanCacheIn20Seconds(data.FileId)
+	//c.cleanCacheIn20Seconds(data.FileId)
 	return nil
 }
 
