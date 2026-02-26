@@ -100,6 +100,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.sameUser(sign.UUID, addr.String()) {
 			return
 		}
+		// addr change, remove invalid addr
+		s.removeByUUID(sign.UUID)
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), sign)
 		s.ackMap.Store(addr.String(), &sync.Map{})
@@ -236,7 +238,6 @@ func (s *Server) removeByUUID(UUID string) {
 	if ok {
 		s.addrMap.Delete(addr)
 		s.uuidMap.Delete(UUID)
-		s.ackMap.Delete(addr)
 	}
 }
 
