@@ -849,8 +849,10 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
+		log.Printf("ack received: %v", ack.Block)
 		cancel, ok := c.ackMap.Load(ack.Block)
 		if !ok {
+			log.Printf("unknown ack: %v", ack.Block)
 			return
 		}
 		cancel.(context.CancelFunc)()
@@ -974,6 +976,7 @@ func (c *Client) sendPacket(bytes []byte, block uint32) error {
 	defer c.retryMap.Delete(block)
 	defer trigger()
 	for i := c.Retries; i > 0; i-- {
+		log.Printf("send packet: %v", block)
 		_, _ = c.conn.WriteTo(bytes, c.SAddr)
 		select {
 		case <-ctx.Done():

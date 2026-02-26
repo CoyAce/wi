@@ -65,8 +65,11 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	)
 	switch {
 	case ack.Unmarshal(pkt) == nil:
+		log.Printf("ack received: %v", ack.Block)
 		m, ok := s.ackMap.Load(addr.String())
 		if !ok {
+			sn, _ := s.addrMap.Load(addr.String())
+			log.Printf("unknown ack: %v, uuid: %v", ack.Block, sn.(*Sign).UUID)
 			return
 		}
 		cancel, ok := m.(*sync.Map).Load(ack.Block)
@@ -370,6 +373,7 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	for i := uint8(0); i < s.Retries; i++ {
+		log.Printf("send packet: %v", block)
 		_, _ = s.conn.WriteTo(bytes, udpAddr)
 		select {
 		case <-ctx.Done():
