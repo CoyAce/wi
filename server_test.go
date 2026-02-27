@@ -156,60 +156,73 @@ func TestPubSub(t *testing.T) {
 	sub := newClient(serverAddr, "sub")
 	other := newClient(serverAddr, "other")
 	_ = pub.PublishFile("test.txt", 5, 1)
-	wrq := <-sub.FileMessages
-	if wrq.FileId != 1 {
-		t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
-	}
-	if wrq.Filename != "test.txt" {
-		t.Errorf("expected filename \"test.txt\"; actual filename %q", wrq.Filename)
-	}
-	q := <-other.FileMessages
-	if !reflect.DeepEqual(wrq, q) {
-		t.Errorf("expected file message %v; actual file message %v", wrq, q)
+	select {
+	case wrq := <-sub.FileMessages:
+		if wrq.FileId != 1 {
+			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+		}
+		if wrq.Filename != "test.txt" {
+			t.Errorf("expected filename \"test.txt\"; actual filename %q", wrq.Filename)
+		}
+		q := <-other.FileMessages
+		if !reflect.DeepEqual(wrq, q) {
+			t.Errorf("expected file message %v; actual file message %v", wrq, q)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
 	_ = sub.SubscribeFile(1, "pub", func(p int, s int) {
 		log.Printf("progress %d, speed %d", p, s)
 	})
-	rrq := <-pub.SubMessages
-	if rrq.FileId != 1 {
-		t.Errorf("expected file id 1; actual file id %d", rrq.FileId)
-	}
-	if rrq.Subscriber != "sub" {
-		t.Errorf("expected subscriber \"sub\"; actual subscriber %q", rrq.Subscriber)
-	}
-	_ = pub.PublishContent("test.txt", 5, 1, BytesToReadSeekCloser([]byte("hello")))
-	wrq = <-sub.FileMessages
-	if wrq.FileId != 1 {
-		t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
-	}
-	if wrq.Code != OpContent {
-		t.Errorf("expected op content %d; actual op content %d", OpContent, wrq.Code)
-	}
-	f, err := os.Open("./test/pub/test.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text, err := io.ReadAll(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(text) != "hello" {
-		t.Errorf("expected \"hello\"; actual %q", string(text))
-	}
-	_ = sub.UnsubscribeFile(1, "pub")
-	subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
-	if !ok {
-		t.Errorf("expected pub to have file id %d", wrq.FileId)
-	}
-	found := false
-	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		if k.(string) == "sub" {
-			found = true
+	select {
+	case rrq := <-pub.SubMessages:
+		if rrq.FileId != 1 {
+			t.Errorf("expected file id 1; actual file id %d", rrq.FileId)
 		}
-		return true
-	})
-	if found {
-		t.Errorf("sub should be removed")
+		if rrq.Subscriber != "sub" {
+			t.Errorf("expected subscriber \"sub\"; actual subscriber %q", rrq.Subscriber)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+
+	_ = pub.PublishContent("test.txt", 5, 1, BytesToReadSeekCloser([]byte("hello")))
+	select {
+	case wrq := <-sub.FileMessages:
+		if wrq.FileId != 1 {
+			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+		}
+		if wrq.Code != OpContent {
+			t.Errorf("expected op content %d; actual op content %d", OpContent, wrq.Code)
+		}
+		f, err := os.Open("./test/pub/test.txt")
+		if err != nil {
+			t.Fatal(err)
+		}
+		text, err := io.ReadAll(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(text) != "hello" {
+			t.Errorf("expected \"hello\"; actual %q", string(text))
+		}
+		_ = sub.UnsubscribeFile(1, "pub")
+		subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
+		if !ok {
+			t.Errorf("expected pub to have file id %d", wrq.FileId)
+		}
+		found := false
+		subs.(*sync.Map).Range(func(k, v interface{}) bool {
+			if k.(string) == "sub" {
+				found = true
+			}
+			return true
+		})
+		if found {
+			t.Errorf("sub should be removed")
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
 }
 
