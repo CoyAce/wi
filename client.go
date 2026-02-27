@@ -403,7 +403,7 @@ func (m *messages) nextID() uint32 {
 func newMessages() messages {
 	return messages{
 		Retries:        9,
-		Timeout:        6 * time.Second,
+		Timeout:        3 * time.Second,
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),
 		SubMessages:    make(chan ReadReq, 20),
@@ -988,9 +988,12 @@ func (c *Client) write(bytes []byte, block uint32) error {
 	defer trigger()
 	for i := c.Retries; i > 0; i-- {
 		log.Printf("send packet: %v, type: %v", block, bytes[:2])
+		start := time.Now()
 		_, _ = c.conn.WriteTo(bytes, c.SAddr)
 		select {
 		case <-ctx.Done():
+			elapsed := time.Since(start)
+			c.Timeout = c.Timeout*8/10 + elapsed*2/10 + 50*time.Millisecond
 			return nil
 		case <-time.After(c.Timeout):
 		case <-retry.Done():

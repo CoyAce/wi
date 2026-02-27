@@ -300,7 +300,7 @@ func (s *Server) init() {
 	}
 
 	if s.Timeout == 0 {
-		s.Timeout = 6 * time.Second
+		s.Timeout = 3 * time.Second
 	}
 
 	s.audioManager = &audioManager{}
@@ -374,9 +374,12 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	for i := uint8(0); i < s.Retries; i++ {
 		log.Printf("send packet: %v to %v", block, addr)
+		start := time.Now()
 		_, _ = s.conn.WriteTo(bytes, udpAddr)
 		select {
 		case <-ctx.Done():
+			elapsed := time.Since(start)
+			s.Timeout = s.Timeout*8/10 + elapsed*2/10 + 100*time.Millisecond
 			return
 		case <-time.After(s.Timeout):
 		}

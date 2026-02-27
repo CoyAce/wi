@@ -3,6 +3,7 @@ package wi
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestRangeTruncate(t *testing.T) {
@@ -34,6 +35,15 @@ func TestRangeTruncate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(n, r) {
 		t.Errorf("should be same")
+	}
+}
+
+func TestTimeout(t *testing.T) {
+	timeout := 5 * time.Second
+	elapsed := 200 * time.Millisecond
+	timeout = timeout*8/10 + elapsed*2/10
+	if timeout != 4040*time.Millisecond {
+		t.Errorf("timeout should be 4040ms")
 	}
 }
 
