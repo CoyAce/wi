@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"image"
-	"image/gif"
 	"io"
 	"log"
 	"net"
@@ -143,9 +141,7 @@ func (f *fileWriter) init(req WriteReq) {
 		updater:  f.updaters[req.FileId],
 	}
 	f.files[req.FileId] = fd
-	if f.isPull(req.FileId) {
-		f.pull(fd)
-	}
+	f.nck(*fd)
 }
 
 func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
@@ -156,15 +152,6 @@ func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
 	finalBlock := (size + BlockSize - 1) / BlockSize
 	rt.Add(MonoRange(uint32(finalBlock + 1)))
 	return rt
-}
-
-func (f *fileWriter) pull(fd *file) {
-	f.nck(*fd)
-}
-
-func (f *fileWriter) isPull(fileId uint32) bool {
-	fd := f.files[fileId]
-	return fd != nil && fd.req.Code == OpContent
 }
 
 func (f *fileWriter) isProcessing(req WriteReq) bool {
@@ -418,28 +405,6 @@ type connManager struct {
 type fileManager struct {
 	*fileWriter
 	*fileReader
-	fileCache map[uint32]*CircularBuffer
-	lock      sync.Mutex
-}
-
-func (f *fileManager) cleanCacheIn20Seconds(id uint32) *time.Timer {
-	return time.AfterFunc(20*time.Second, func() {
-		f.lock.Lock()
-		delete(f.fileCache, id)
-		f.lock.Unlock()
-	})
-}
-
-func (f *fileManager) initCache(id uint32) {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-	f.fileCache[id] = NewCircularBuffer(block32MB)
-}
-
-func (f *fileManager) loadCache(id uint32) *CircularBuffer {
-	f.lock.Lock()
-	defer f.lock.Unlock()
-	return f.fileCache[id]
 }
 
 func newFileMetaInfo(
@@ -465,7 +430,6 @@ func newFileMetaInfo(
 			updaters:     make(map[uint32]*updater),
 			nck:          nck,
 		},
-		fileCache: make(map[uint32]*CircularBuffer),
 	}
 }
 
@@ -567,26 +531,6 @@ func (c *Client) Ready() {
 	}
 }
 
-func (c *Client) SyncIcon(img image.Image) error {
-	filename := "icon.png"
-	buf := new(bytes.Buffer)
-	err := EncodeImg(buf, filename, img)
-	if err != nil {
-		return err
-	}
-	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, uint64(buf.Len()), 0)
-}
-
-func (c *Client) SyncGif(gifImg *gif.GIF) error {
-	filename := "icon.gif"
-	buf := new(bytes.Buffer)
-	err := gif.EncodeAll(buf, gifImg)
-	if err != nil {
-		return err
-	}
-	return c.SendFile(bytes.NewReader(buf.Bytes()), OpSyncIcon, filename, uint64(buf.Len()), 0)
-}
-
 func (c *Client) SendVoice(filename string, duration uint32) error {
 	i, err := os.Stat(filename)
 	if err != nil {
@@ -597,7 +541,8 @@ func (c *Client) SendVoice(filename string, duration uint32) error {
 		return err
 	}
 	defer r.Close()
-	return c.SendFile(r, OpSendVoice, filepath.Base(filename), uint64(i.Size()), duration)
+	hash := Hash(unsafe.Pointer(r))
+	return c.SendFile(r, OpSendVoice, hash, filepath.Base(filename), uint64(i.Size()), duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
@@ -653,10 +598,7 @@ func (c *Client) PublishFile(name string, size uint64, id uint32) error {
 }
 
 func (c *Client) PublishContent(name string, size uint64, id uint32, content io.ReadSeekCloser) error {
-	if c.contents[id] == nil {
-		c.contents[id] = &fileContent{fileId: id, content: content}
-	}
-	return c.send(&WriteReq{Code: OpContent, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.FullID()})
+	return c.SendFile(content, OpContent, id, name, size, 0)
 }
 
 func (c *Client) SubscribeFile(id uint32, sender string, update func(p int, s int)) error {
@@ -670,46 +612,22 @@ func (c *Client) UnsubscribeFile(id uint32, sender string) error {
 	return c.send(&ReadReq{Code: OpUnsubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
-func (c *Client) SendFile(reader io.Reader, code OpCode,
-	filename string, size uint64, duration uint32) error {
-	hash := Hash(unsafe.Pointer(&reader))
-	log.Printf("file id: %v", hash)
+func (c *Client) SendFile(content io.ReadSeekCloser, code OpCode, fileId uint32, filename string, size uint64, duration uint32) error {
+	log.Printf("Send file: %v", fileId)
 
-	wrq := WriteReq{Code: code, Block: c.nextID(), FileId: hash, UUID: c.FullID(),
-		Filename: filename, Size: size, Duration: duration}
-	err := c.send(&wrq)
-	if err != nil {
-		return err
+	if c.contents[fileId] == nil {
+		c.contents[fileId] = &fileContent{fileId: fileId, content: content}
 	}
-	c.initCache(wrq.FileId)
 
-	data := Data{FileId: wrq.FileId, Payload: reader}
-	err = c.sendData(data)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Client) sendData(data Data) error {
-	cb := c.loadCache(data.FileId)
-	for n := DatagramSize; n == DatagramSize; {
-		pkt, err := data.Marshal()
-		if err != nil {
-			return err
-		}
-		cb.Write(Packet{Block: data.Block, Data: pkt})
-		n, err = c.conn.WriteTo(pkt, c.SAddr)
-		if err != nil {
-			return err
-		}
-	}
-	err := c.opReady(data.FileId)
-	if err != nil {
-		return err
-	}
-	//c.cleanCacheIn20Seconds(data.FileId)
-	return nil
+	return c.send(&WriteReq{
+		Code:     code,
+		Block:    c.nextID(),
+		FileId:   fileId,
+		UUID:     c.FullID(),
+		Filename: filename,
+		Size:     size,
+		Duration: duration},
+	)
 }
 
 func (c *Client) opReady(id uint32) error {
@@ -926,19 +844,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case nck.Unmarshal(buf) == nil:
 		c.ack(addr, nck.Block)
 		log.Printf("nck received")
-		if c.fileReader.isPull(nck.FileId) {
-			c.req <- nck
-			return
-		}
-		cb := c.loadCache(nck.FileId)
-		if cb == nil {
-			return
-		}
-		packets := cb.Read(nck.ranges)
-		for _, pkt := range packets {
-			_, _ = c.conn.WriteTo(pkt.Data, c.SAddr)
-		}
-		_ = c.opReady(nck.FileId)
+		c.req <- nck
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
