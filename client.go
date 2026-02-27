@@ -911,4 +911,3 @@ func (c *Client) write(bytes []byte, block uint32) error {
 }
 
 var DefaultClient *Client
-var block32MB = 32 * 1024 * 1024 / BlockSize

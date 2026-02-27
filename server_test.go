@@ -226,6 +226,36 @@ func TestPubSub(t *testing.T) {
 	}
 }
 
+func TestSendFile(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	sender := newClient(serverAddr, "sender")
+	receiver1 := newClient(serverAddr, "receiver1")
+	receiver2 := newClient(serverAddr, "receiver2")
+	_ = sender.SendText("sync")
+	data := []byte("This is a file")
+	content := BytesToReadSeekCloser(data)
+	err := sender.SendFile(content, OpSyncIcon, 1, "test.txt", uint64(len(data)), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case wrq := <-receiver1.FileMessages:
+		if wrq.FileId != 1 {
+			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	select {
+	case wrq := <-receiver2.FileMessages:
+		if wrq.FileId != 1 {
+			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+}
+
 func TestUnknownUser(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
