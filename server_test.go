@@ -186,7 +186,9 @@ func TestPubSub(t *testing.T) {
 		t.Errorf("timeout")
 	}
 
-	_ = pub.PublishContent("test.txt", 5, 1, BytesToReadSeekCloser([]byte("hello")))
+	_ = pub.PublishContent(func() (io.ReadSeekCloser, error) {
+		return BytesToReadSeekCloser([]byte("hello")), nil
+	}, "test.txt", 5, 1)
 	select {
 	case wrq := <-sub.FileMessages:
 		if wrq.FileId != 1 {
@@ -233,8 +235,9 @@ func TestSendFile(t *testing.T) {
 	receiver2 := newClient(serverAddr, "receiver2")
 	_ = sender.SendText("sync")
 	data := []byte("This is a file")
-	content := BytesToReadSeekCloser(data)
-	err := sender.SendFile(content, OpSyncIcon, 1, "test.txt", uint64(len(data)), 0)
+	err := sender.SendFile(func() (io.ReadSeekCloser, error) {
+		return BytesToReadSeekCloser(data), nil
+	}, OpSyncIcon, 1, "test.txt", uint64(len(data)), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

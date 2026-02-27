@@ -231,7 +231,7 @@ func writeTo(filePath string, data []Data) {
 type fileContent struct {
 	fileId     uint32
 	processing bool
-	content    io.ReadSeekCloser
+	content    func() (io.ReadSeekCloser, error)
 	reading    RangeTracker
 	pending    RangeTracker
 	lock       sync.Mutex
@@ -306,17 +306,23 @@ func (f *fileReader) process() {
 func (f *fileReader) read(id uint32) {
 	c := f.contents[id]
 	c.setProcessing()
+	content, err := c.content()
+	if err != nil {
+		log.Printf("read file failed: %v", err)
+		return
+	}
+	defer content.Close()
 LOOP:
 	reading := make([]Range, len(c.reading.ranges))
 	copy(reading, c.reading.ranges)
 	for _, rg := range reading {
 		pos := (rg.start - 1) * BlockSize
-		_, err := c.content.Seek(int64(pos), 0)
+		_, err := content.Seek(int64(pos), 0)
 		if err != nil {
 			log.Printf("Seek failed: %v", err)
 		}
 		for i := rg.start; i <= rg.end; i++ {
-			d := Data{FileId: c.fileId, Block: i - 1, Payload: c.content}
+			d := Data{FileId: c.fileId, Block: i - 1, Payload: content}
 			err = f.writeOnce(d)
 			if err != nil {
 				log.Printf("Send failed: %v", err)
@@ -332,7 +338,7 @@ LOOP:
 		goto LOOP
 	}
 	c.unsetProcessing()
-	err := f.opReady(id)
+	err = f.opReady(id)
 	if err != nil {
 		log.Printf("Ready failed: %v", err)
 	}
@@ -536,13 +542,10 @@ func (c *Client) SendVoice(filename string, duration uint32) error {
 	if err != nil {
 		return err
 	}
-	r, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	hash := Hash(unsafe.Pointer(r))
-	return c.SendFile(r, OpSendVoice, hash, filepath.Base(filename), uint64(i.Size()), duration)
+	hash := Hash(unsafe.Pointer(&i))
+	return c.SendFile(func() (io.ReadSeekCloser, error) {
+		return os.Open(filename)
+	}, OpSendVoice, hash, filepath.Base(filename), uint64(i.Size()), duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
@@ -597,7 +600,7 @@ func (c *Client) PublishFile(name string, size uint64, id uint32) error {
 	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.FullID()})
 }
 
-func (c *Client) PublishContent(name string, size uint64, id uint32, content io.ReadSeekCloser) error {
+func (c *Client) PublishContent(content func() (io.ReadSeekCloser, error), name string, size uint64, id uint32) error {
 	return c.SendFile(content, OpContent, id, name, size, 0)
 }
 
@@ -612,7 +615,7 @@ func (c *Client) UnsubscribeFile(id uint32, sender string) error {
 	return c.send(&ReadReq{Code: OpUnsubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
 }
 
-func (c *Client) SendFile(content io.ReadSeekCloser, code OpCode, fileId uint32, filename string, size uint64, duration uint32) error {
+func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode, fileId uint32, filename string, size uint64, duration uint32) error {
 	log.Printf("Send file: %v", fileId)
 
 	if c.contents[fileId] == nil {
