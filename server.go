@@ -16,6 +16,7 @@ type Peer struct {
 }
 
 type Server struct {
+	Status  chan struct{} `json:"-"` // initialization status
 	Retries uint8         // the number of times to retry a failed transmission
 	Timeout time.Duration // the duration to wait for an acknowledgement
 	fileMap sync.Map      // fileId -> wrq
@@ -24,6 +25,12 @@ type Server struct {
 	uuidMap sync.Map      // uuid -> addr
 	*audioManager
 	conn net.PacketConn
+}
+
+func (s *Server) Ready() {
+	if s.Status != nil {
+		<-s.Status
+	}
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -44,6 +51,9 @@ func (s *Server) Serve() error {
 	log.Printf("Listening on %s ...\n", s.conn.LocalAddr())
 
 	s.init()
+	if s.Status != nil {
+		close(s.Status)
+	}
 
 	for {
 		buf := make([]byte, DatagramSize)
@@ -135,10 +145,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			}
 		case OpPublish:
 			pair := FilePair{FileId: wrq.FileId, UUID: wrq.UUID}
-			_, ok := s.pubMap.Load(pair)
-			if !ok {
-				s.pubMap.Store(pair, &sync.Map{})
-			}
+			s.pubMap.Store(pair, &sync.Map{})
 		case OpContent:
 			s.addFile(wrq)
 			s.dispatchToSubscribers(wrq, pkt)

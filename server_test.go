@@ -155,6 +155,8 @@ func TestPubSub(t *testing.T) {
 	pub := newClient(serverAddr, "pub")
 	sub := newClient(serverAddr, "sub")
 	other := newClient(serverAddr, "other")
+	_ = sub.SendText("ping")
+	_ = other.SendText("pong")
 	_ = pub.PublishFile("test.txt", 5, 1)
 	select {
 	case wrq := <-sub.FileMessages:
@@ -386,11 +388,12 @@ func setUpClient(t *testing.T) (net.PacketConn, error) {
 }
 
 func setUpServer(t *testing.T) (*Server, string) {
-	s := Server{}
+	s := Server{Status: make(chan struct{})}
 	port := rand.Intn(40000) + 10000
 	serverAddr := "127.0.0.1:" + strconv.Itoa(port)
 	go func() {
 		t.Error(s.ListenAndServe(serverAddr))
 	}()
+	s.Ready()
 	return &s, serverAddr
 }
