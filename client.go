@@ -68,6 +68,7 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.counter++
 	req := fd.req
 	fd.data = append(fd.data, data)
+	fd.rt.Add(MonoRange(data.Block))
 	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		if fd.elapsed1Second() {
@@ -187,10 +188,8 @@ func (f *fileWriter) tryComplete(id uint32) {
 
 func (f *fileWriter) flush(fd *file, filePath string) {
 	d := fd.data
-	r := Range{}
 	for d != nil {
-		d, r = write(filePath, d)
-		fd.rt.Add(r)
+		d = write(filePath, d)
 	}
 	fd.data = fd.data[:0]
 }

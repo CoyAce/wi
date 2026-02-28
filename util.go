@@ -96,10 +96,9 @@ func findConsecutive(data []Data) int {
 	return i
 }
 
-func write(filePath string, data []Data) ([]Data, Range) {
-	// handle number order error, data block may not ordered
+func write(filePath string, data []Data) []Data {
 	if len(data) == 0 {
-		return nil, Range{}
+		return nil
 	}
 	data = removeDuplicates(data)
 	sort.Slice(data, func(i, j int) bool {
@@ -112,9 +111,9 @@ func write(filePath string, data []Data) ([]Data, Range) {
 	writeTo(filePath, data[:i])
 	if i < len(data) {
 		// return leftover
-		return data[i:], Range{data[0].Block, data[i-1].Block}
+		return data[i:]
 	}
-	return nil, Range{data[0].Block, data[len(data)-1].Block}
+	return nil
 }
 
 func EncodeGif(w io.Writer, filename string, gifImg *gif.GIF) {

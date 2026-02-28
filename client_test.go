@@ -161,6 +161,31 @@ func TestRangeAdd(t *testing.T) {
 	}
 }
 
+func TestMonoRange(t *testing.T) {
+	rt := RangeTracker{}
+	rt.Add(MonoRange(4))
+	rt.Add(MonoRange(2))
+	expected := []Range{MonoRange(1), MonoRange(3)}
+	if !reflect.DeepEqual(rt.GetRanges(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	}
+	rt.Add(MonoRange(6))
+	expected = []Range{MonoRange(1), MonoRange(3), MonoRange(5)}
+	if !reflect.DeepEqual(rt.GetRanges(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	}
+	rt.Add(MonoRange(1))
+	rt.Add(MonoRange(3))
+	rt.Add(MonoRange(5))
+	if !rt.isCompleted() {
+		t.Error("Expected RangeTracker to be completed")
+	}
+	rt.Add(Range{1, 6})
+	if !rt.isCompleted() {
+		t.Error("Expected RangeTracker to be completed")
+	}
+}
+
 func TestNckMarshalAndUnmarshal(t *testing.T) {
 	ranges := []Range{{1, 1}, {3, 5}, {8, 8}}
 	nck := Nck{FileId: 1, ranges: ranges}
