@@ -161,6 +161,34 @@ func TestRangeAdd(t *testing.T) {
 	}
 }
 
+func TestRangeContains(t *testing.T) {
+	rt := RangeTracker{}
+	rt.Add(Range{1, 20})
+	if !rt.Contains(Range{1, 20}) || !rt.Contains(Range{1, 1}) || !rt.Contains(Range{20, 20}) {
+		t.Error("Expected RangeTracker to contain Range")
+	}
+	if rt.Contains(MonoRange(21)) {
+		t.Error("Expected RangeTracker to not contain MonoRange(21)")
+	}
+	if rt.Contains(Range{1, 21}) {
+		t.Error("Expected RangeTracker to not contain Range{1,21}")
+	}
+	rt.Add(Range{23, 23})
+	if rt.Contains(MonoRange(22)) {
+		t.Error("Expected RangeTracker to not contain MonoRange(22)")
+	}
+	rt.Add(MonoRange(21))
+	if !rt.Contains(MonoRange(21)) {
+		t.Error("Expected RangeTracker to contain MonoRange(21)")
+	}
+	if rt.Contains(MonoRange(22)) {
+		t.Error("Expected RangeTracker to not contain MonoRange(22)")
+	}
+	if rt.Contains(Range{21, 23}) {
+		t.Error("Expected RangeTracker to not contain Range{21,23}")
+	}
+}
+
 func TestMonoRange(t *testing.T) {
 	rt := RangeTracker{}
 	rt.Add(MonoRange(4))

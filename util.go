@@ -209,12 +209,27 @@ func (r *RangeTracker) Add(rg Range) {
 		if rg.end < r.nextBlock() {
 			return
 		}
-	}
-	if rg.start > r.nextBlock() {
+	} else if rg.start > r.nextBlock() {
 		// 考虑丢帧
 		r.add(Range{r.nextBlock(), rg.start - 1})
 	}
 	r.latestBlock = rg.end
+}
+
+// Contains return true if rg is not missing.
+func (r *RangeTracker) Contains(rg Range) bool {
+	if rg.end >= r.nextBlock() {
+		return false
+	}
+	if len(r.ranges) == 0 {
+		return true
+	}
+	for _, rng := range r.ranges {
+		if rng.overlaps(rg) {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *RangeTracker) GetRanges() []Range {

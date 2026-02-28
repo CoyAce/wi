@@ -664,8 +664,13 @@ func (r *Range) Unmarshal(rd io.Reader) error {
 	return nil
 }
 
+// contains return r contains v
 func (r *Range) contains(v Range) bool {
-	return v.start >= r.start && v.end <= r.end
+	return r.start <= v.start && r.end >= v.end
+}
+
+func (r *Range) overlaps(v Range) bool {
+	return !(r.before(v) || r.after(v))
 }
 
 func (r *Range) before(v Range) bool {
