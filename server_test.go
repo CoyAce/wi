@@ -265,6 +265,74 @@ func TestSendFile(t *testing.T) {
 	}
 }
 
+func TestClientDupMessage(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	client, err := setUpClient(t)
+	defer func() { _ = client.Close() }()
+
+	// send sign
+	sign := Sign{1, "default", "sender"}
+	signPkt, _ := sign.Marshal()
+
+	sAddr, _ := net.ResolveUDPAddr("udp", serverAddr)
+	_, err = client.WriteTo(signPkt, sAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// read ack
+	buf := make([]byte, DatagramSize)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, _ = client.ReadFrom(buf)
+
+	msg := SignedMessage{Sign: sign, Payload: []byte("hello")}
+	msgPkt, _ := msg.Marshal()
+	_, _ = client.WriteTo(msgPkt, sAddr)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, _ = client.ReadFrom(buf)
+	select {
+	case received := <-receiver.SignedMessages:
+		if !reflect.DeepEqual(received, msg) {
+			t.Errorf("expected message %v; actual message %v", msg, received)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	_, _ = client.WriteTo(msgPkt, sAddr)
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _, _ = client.ReadFrom(buf)
+	select {
+	case received := <-receiver.SignedMessages:
+		t.Errorf("duplicated message %v", received)
+	default:
+	}
+}
+
+func TestServerDupMessage(t *testing.T) {
+	s, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	_ = receiver.SendText("sync")
+	sign := Sign{1, "default", "sender"}
+	msg := SignedMessage{Sign: sign, Payload: []byte("hello")}
+	msgPkt, _ := msg.Marshal()
+	addr := s.findAddrByUUID(receiver.FullID())
+	s.dispatch(addr, msgPkt, sign.Block)
+	select {
+	case received := <-receiver.SignedMessages:
+		if !reflect.DeepEqual(received, msg) {
+			t.Errorf("expected message %v; actual message %v", msg, received)
+		}
+	default:
+		t.Errorf("no message received")
+	}
+	s.dispatch(addr, msgPkt, sign.Block)
+	select {
+	case received := <-receiver.SignedMessages:
+		t.Errorf("duplicated message %v", received)
+	default:
+	}
+}
+
 func TestUnknownUser(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")

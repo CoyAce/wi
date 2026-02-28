@@ -36,6 +36,7 @@ const (
 	OpUnsubscribe
 	OpContent
 	OpReady
+	OpCheck
 )
 
 var wrqSet = map[OpCode]bool{
@@ -457,12 +458,67 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 	return nil
 }
 
+type Check struct {
+	Block uint32
+	UUID  string
+}
+
+func (c *Check) Marshal() ([]byte, error) {
+	size := 2 + 4 + len(c.UUID) + 1 // operation code  + block number
+
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpCheck)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, c.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, c.UUID) //  write UUID
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (c *Check) Unmarshal(p []byte) error {
+	var code OpCode
+	r := bytes.NewBuffer(p)
+
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpCheck {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &c.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	c.UUID, err = readString(r)
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
+}
+
 type Ack struct {
 	Block uint32
 }
 
 func (a *Ack) Marshal() ([]byte, error) {
-	size := 2 + 4 // operation code  + block number
+	const size = 2 + 4 // operation code  + block number
 
 	b := new(bytes.Buffer)
 	b.Grow(size)

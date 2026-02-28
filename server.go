@@ -76,6 +76,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		data   = Data{}
 		ack    = Ack{}
 		nck    = Nck{}
+		check  = Check{}
 		unsign = OpSignOut
 	)
 	switch {
@@ -91,6 +92,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		cancel.(context.CancelFunc)()
+	case check.Unmarshal(pkt) == nil:
+		if s.check(addr.String(), check.Block) {
+			s.ack(addr, msg.Block)
+		}
 	case msg.Unmarshal(pkt) == nil:
 		if s.userNotExist(msg.Sign.UUID) {
 			s.reject(addr)
@@ -320,11 +325,11 @@ func (s *Server) addFile(wrq WriteReq) {
 
 func (s *Server) init() {
 	if s.Retries == 0 {
-		s.Retries = 9
+		s.Retries = 18
 	}
 
 	if s.Timeout == 0 {
-		s.Timeout = 3 * time.Second
+		s.Timeout = 500 * time.Millisecond
 	}
 
 	s.audioManager = &audioManager{}
@@ -384,6 +389,14 @@ func (s *Server) dup(addr string, block uint32) bool {
 	return dup
 }
 
+func (s *Server) check(addr string, block uint32) bool {
+	v, ok := s.addrMap.Load(addr)
+	if !ok {
+		return false
+	}
+	return v.(Peer).Contains(MonoRange(block))
+}
+
 func (s *Server) handle(sign *Sign, bytes []byte, block uint32) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
@@ -402,26 +415,38 @@ func (s *Server) userNotExist(UUID string) bool {
 
 // dispatch may block by slow connection
 func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
-	p, ok := s.addrMap.Load(addr)
+	v, ok := s.addrMap.Load(addr)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p.(Peer).Store(block, cancel)
-	defer p.(Peer).Delete(block)
+	p := v.(Peer)
+	p.Store(block, cancel)
+	defer p.Delete(block)
 	defer cancel()
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
+	var start time.Time
 	for i := uint8(0); i < s.Retries; i++ {
-		log.Printf("send packet: %v to %v", block, addr)
-		start := time.Now()
-		_, _ = s.conn.WriteTo(bytes, udpAddr)
+		if i%2 == 0 {
+			log.Printf("send packet: %v to %v", block, addr)
+			start = time.Now()
+			_, _ = s.conn.WriteTo(bytes, udpAddr)
+		} else {
+			log.Printf("send check: %v to %v", block, addr)
+			check := Check{UUID: p.UUID, Block: block}
+			pkt, _ := check.Marshal()
+			_, _ = s.conn.WriteTo(pkt, udpAddr)
+		}
+		timer := time.After(s.Timeout)
+		log.Printf("timeout: %v", s.Timeout)
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)
-			s.Timeout = s.Timeout*8/10 + elapsed*2/10 + 100*time.Millisecond
+			s.Timeout = s.Timeout*8/10 + elapsed*2/10
 			return
-		case <-time.After(s.Timeout):
+		case <-timer:
+			s.Timeout += s.Timeout * 8 / 100
 		}
 	}
 	log.Printf("[%s] write timeout after %d retries", addr, s.Retries)

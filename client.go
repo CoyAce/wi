@@ -386,20 +386,20 @@ type messages struct {
 	MessageCounter uint32             // the number of sent messages
 	Retries        uint8              // the number of times to retry a failed transmission
 	Timeout        time.Duration      // the duration to wait for an acknowledgement
-	id             uint32             // global message id
-	ackMap         sync.Map           // block -> context.CancelFunc
-	retryMap       sync.Map           // block -> context.CancelFunc
+	ackHandlers    sync.Map           // block -> context.CancelFunc
+	retryHandlers  sync.Map           // block -> context.CancelFunc
+	trackers       sync.Map           // uuid -> *RangeTracker
 }
 
 func (m *messages) nextID() uint32 {
-	atomic.AddUint32(&m.id, 1)
-	return m.id
+	atomic.AddUint32(&m.MessageCounter, 1)
+	return m.MessageCounter
 }
 
 func newMessages() messages {
 	return messages{
-		Retries:        9,
-		Timeout:        3 * time.Second,
+		Retries:        18,
+		Timeout:        500 * time.Millisecond,
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),
 		SubMessages:    make(chan ReadReq, 20),
@@ -660,7 +660,6 @@ func (c *Client) SendText(text string) error {
 		return err
 	}
 
-	c.MessageCounter++
 	return c.write(pkt, msg.Sign.Block)
 }
 
@@ -680,7 +679,7 @@ func (c *Client) ListenAndServe(addr string) {
 
 	c.SAddr, err = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
-		// auto reconnect in case of server down
+		// auto reconnect in case of server restart
 		var threshold uint32 = 5
 		once := sync.Once{}
 		for {
@@ -690,9 +689,8 @@ func (c *Client) ListenAndServe(addr string) {
 					close(c.Status)
 				}
 			})
-			ok := c.MessageCounter > threshold
+			ok := c.MessageCounter%threshold == 0
 			if ok && c.SyncFunc != nil {
-				c.MessageCounter = 0
 				threshold++
 				c.SyncFunc()
 			}
@@ -711,7 +709,7 @@ func (c *Client) init() {
 
 // SendSign try to write sign to server
 func (c *Client) SendSign() {
-	sign := Sign{c.nextID(), c.Sign, c.FullID()}
+	sign := Sign{0, c.Sign, c.FullID()}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
@@ -733,7 +731,7 @@ func (c *Client) SignIn() {
 	if err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
 	} else {
-		c.retryMap.Range(func(k, v interface{}) bool {
+		c.retryHandlers.Range(func(k, v interface{}) bool {
 			v.(context.CancelFunc)()
 			return true
 		})
@@ -775,30 +773,41 @@ func (c *Client) serve() {
 
 func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
-		ack  Ack
-		nck  Nck
-		msg  SignedMessage
-		data Data
-		ec   ErrCode
-		rrq  ReadReq
-		wrq  WriteReq
+		ack   Ack
+		nck   Nck
+		msg   SignedMessage
+		data  Data
+		ec    ErrCode
+		rrq   ReadReq
+		wrq   WriteReq
+		check Check
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
 		log.Printf("ack received: %v", ack.Block)
-		cancel, ok := c.ackMap.Load(ack.Block)
+		cancel, ok := c.ackHandlers.Load(ack.Block)
 		if !ok {
 			log.Printf("unknown ack: %v", ack.Block)
 			return
 		}
 		cancel.(context.CancelFunc)()
+	case check.Unmarshal(buf) == nil:
+		if c.check(check.UUID, check.Block) {
+			c.ack(addr, msg.Block)
+		}
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.Block)
+		if c.dup(msg.UUID, msg.Block) {
+			return
+		}
 		s := string(msg.Payload)
 		log.Printf("Receiving text [%s] from [%s]\n", s, msg.Sign.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
 		c.ack(addr, rrq.Block)
+		if c.dup(rrq.Subscriber, rrq.Block) {
+			return
+		}
 		switch rrq.Code {
 		case OpSubscribe:
 			c.SubMessages <- rrq
@@ -806,6 +815,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 	case wrq.Unmarshal(buf) == nil:
 		c.ack(addr, wrq.Block)
+		if c.dup(wrq.UUID, wrq.Block) {
+			return
+		}
 		audioId := c.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -858,6 +870,23 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	}
 }
 
+func (c *Client) dup(UUID string, block uint32) bool {
+	v, _ := c.trackers.LoadOrStore(UUID, new(RangeTracker))
+	r := MonoRange(block)
+	t := v.(*RangeTracker)
+	dup := t.Contains(r)
+	if !dup {
+		t.Add(r)
+	}
+	return dup
+}
+
+func (c *Client) check(UUID string, block uint32) bool {
+	v, _ := c.trackers.LoadOrStore(UUID, new(RangeTracker))
+	r := MonoRange(block)
+	return v.(*RangeTracker).Contains(r)
+}
+
 func (c *Client) ack(addr net.Addr, block uint32) {
 	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
@@ -892,25 +921,41 @@ func (c *Client) SetServerAddr(addr string) {
 func (c *Client) write(bytes []byte, block uint32) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	retry, trigger := context.WithCancel(context.Background())
-	c.ackMap.Store(block, cancel)
-	c.retryMap.Store(block, trigger)
-	defer c.ackMap.Delete(block)
+	c.ackHandlers.Store(block, cancel)
+	c.retryHandlers.Store(block, trigger)
+	defer c.ackHandlers.Delete(block)
 	defer cancel()
-	defer c.retryMap.Delete(block)
+	defer c.retryHandlers.Delete(block)
 	defer trigger()
-	for i := c.Retries; i > 0; i-- {
-		log.Printf("send packet: %v, type: %v", block, bytes[:2])
-		start := time.Now()
-		_, _ = c.conn.WriteTo(bytes, c.SAddr)
+	var start time.Time
+	for i := uint8(0); i < c.Retries; i++ {
+		if i%2 == 0 {
+			log.Printf("send packet: %v, type: %v", block, bytes[:2])
+			start = time.Now()
+			_, _ = c.conn.WriteTo(bytes, c.SAddr)
+		} else {
+			log.Printf("send check: %v, type: %v", block, bytes[:2])
+			check := Check{Block: block}
+			pkt, _ := check.Marshal()
+			_, _ = c.conn.WriteTo(pkt, c.SAddr)
+		}
+	WAIT:
+		timer := time.After(c.Timeout)
+		log.Printf("timeout: %v", c.Timeout)
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)
-			c.Timeout = c.Timeout*8/10 + elapsed*2/10 + 50*time.Millisecond
+			c.Timeout = c.Timeout*8/10 + elapsed*2/10
 			return nil
-		case <-time.After(c.Timeout):
+		case <-timer:
+			log.Printf("packet: %v timeout", block)
+			c.Timeout += c.Timeout * 8 / 100
 		case <-retry.Done():
+			log.Printf("retry")
 			retry, trigger = context.WithCancel(context.Background())
-			c.retryMap.Store(block, trigger)
+			c.retryHandlers.Store(block, trigger)
+			_, _ = c.conn.WriteTo(bytes, c.SAddr)
+			goto WAIT
 		}
 	}
 	return errors.New("exhausted retries")
