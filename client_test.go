@@ -48,7 +48,7 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestFileContentRangeMergeAndExclude(t *testing.T) {
-	fc := fileContent{}
+	fc := fileContent{reading: new(RangeTracker), pending: new(RangeTracker)}
 	fc.add([]Range{{50, 100}})
 	if !fc.pending.isCompleted() {
 		t.Errorf("pending should have been completed")

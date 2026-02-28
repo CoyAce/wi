@@ -9,14 +9,19 @@ import (
 	"time"
 )
 
+type Peer struct {
+	*Sign         // identity
+	*sync.Map     // block -> CancelFunc
+	*RangeTracker // block tracker
+}
+
 type Server struct {
 	Retries uint8         // the number of times to retry a failed transmission
 	Timeout time.Duration // the duration to wait for an acknowledgement
 	fileMap sync.Map      // fileId -> wrq
 	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
-	addrMap sync.Map      // addr -> Sign
+	addrMap sync.Map      // addr -> Peer
 	uuidMap sync.Map      // uuid -> addr
-	ackMap  sync.Map      // addr -> *sync.Map { block -> CancelFunc }
 	*audioManager
 	conn net.PacketConn
 }
@@ -66,12 +71,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	switch {
 	case ack.Unmarshal(pkt) == nil:
 		log.Printf("ack received: %v", ack.Block)
-		m, ok := s.ackMap.Load(addr.String())
+		p, ok := s.addrMap.Load(addr.String())
 		if !ok {
 			log.Printf("unknown ack: %v, addr: %v", ack.Block, addr.String())
 			return
 		}
-		cancel, ok := m.(*sync.Map).Load(ack.Block)
+		cancel, ok := p.(Peer).Load(ack.Block)
 		if !ok {
 			return
 		}
@@ -82,7 +87,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.ack(addr, msg.Block)
-		s.handle(msg.Sign, pkt, msg.Block)
+		if s.dup(addr.String(), msg.Block) {
+			return
+		}
+		s.handle(&msg.Sign, pkt, msg.Block)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case data.Unmarshal(pkt) == nil:
 		if s.isAudio(data.FileId) {
@@ -96,14 +104,13 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		s.handleFileData(data, pkt)
 	case sign.Unmarshal(pkt) == nil:
 		s.ack(addr, sign.Block)
-		if s.sameUser(sign.UUID, addr.String()) {
+		if s.dup(addr.String(), msg.Block) || s.sameUser(sign.UUID, addr.String()) {
 			return
 		}
 		// addr change, remove invalid addr
 		s.removeByUUID(sign.UUID)
 		s.uuidMap.Store(sign.UUID, addr.String())
-		s.addrMap.Store(addr.String(), sign)
-		s.ackMap.Store(addr.String(), &sync.Map{})
+		s.addrMap.Store(addr.String(), Peer{Sign: &sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)})
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case wrq.Unmarshal(pkt) == nil:
 		if s.userNotExist(wrq.UUID) {
@@ -111,6 +118,9 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.ack(addr, wrq.Block)
+		if s.dup(addr.String(), wrq.Block) {
+			return
+		}
 		audioId := s.decodeAudioId(wrq.FileId)
 		switch wrq.Code {
 		case OpAudioCall:
@@ -143,6 +153,9 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.ack(addr, rrq.Block)
+		if s.dup(addr.String(), rrq.Block) {
+			return
+		}
 		switch rrq.Code {
 		case OpSubscribe:
 			s.dispatchToPublisher(pkt, rrq)
@@ -151,10 +164,13 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		default:
 		}
 	case nck.Unmarshal(pkt) == nil:
-		s.ack(addr, nck.Block)
 		sn := s.findSignByFileId(nck.FileId)
 		if s.userNotExist(sn.UUID) {
 			s.reject(addr)
+			return
+		}
+		s.ack(addr, nck.Block)
+		if s.dup(addr.String(), nck.Block) {
 			return
 		}
 		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, nck.Block)
@@ -241,19 +257,19 @@ func (s *Server) removeByUUID(UUID string) {
 }
 
 func (s *Server) removeByAddr(addr string) {
-	sign, ok := s.addrMap.Load(addr)
+	p, ok := s.addrMap.Load(addr)
 	if ok {
 		s.addrMap.Delete(addr)
-		s.uuidMap.Delete(sign.(Sign).UUID)
+		s.uuidMap.Delete(p.(Peer).UUID)
 	}
 }
 
 func (s *Server) handleStreamData(data Data, pkt []byte, sender net.Addr) {
-	senderSign, ok := s.addrMap.Load(sender.String())
+	p, ok := s.addrMap.Load(sender.String())
 	if !ok {
 		return
 	}
-	UUID := senderSign.(Sign).UUID
+	UUID := p.(Peer).UUID
 	receivers, ok := s.audioReceiver.Load(s.decodeAudioId(data.FileId))
 	if !ok {
 		return
@@ -278,9 +294,10 @@ func (s *Server) isFinalPacket(n int) bool {
 	return n < DatagramSize
 }
 
-func (s *Server) directRelay(sign Sign, pkt []byte) {
+func (s *Server) directRelay(sign *Sign, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
-		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
+		p := value.(Peer)
+		if p.Sign.Sign == sign.Sign && p.UUID != sign.UUID {
 			go func() {
 				addr, _ := net.ResolveUDPAddr("udp", key.(string))
 				_, _ = s.conn.WriteTo(pkt, addr)
@@ -306,16 +323,16 @@ func (s *Server) init() {
 	s.audioManager = &audioManager{}
 }
 
-func (s *Server) findSignByUUID(uuid string) Sign {
+func (s *Server) findSignByUUID(uuid string) *Sign {
 	addr, ok := s.uuidMap.Load(uuid)
 	if !ok {
-		return Sign{UUID: uuid}
+		return &Sign{UUID: uuid}
 	}
-	sign, ok := s.addrMap.Load(addr)
+	p, ok := s.addrMap.Load(addr)
 	if !ok {
-		return Sign{UUID: uuid}
+		return &Sign{UUID: uuid}
 	}
-	return sign.(Sign)
+	return p.(Peer).Sign
 }
 
 func (s *Server) findAddrByUUID(uuid string) string {
@@ -326,10 +343,10 @@ func (s *Server) findAddrByUUID(uuid string) string {
 	return ""
 }
 
-func (s *Server) findSignByFileId(fileId uint32) Sign {
+func (s *Server) findSignByFileId(fileId uint32) *Sign {
 	wrq, ok := s.fileMap.Load(fileId)
 	if !ok {
-		return Sign{}
+		return &Sign{}
 	}
 	UUID := wrq.(WriteReq).UUID
 	return s.findSignByUUID(UUID)
@@ -345,9 +362,25 @@ func (s *Server) ack(addr net.Addr, block uint32) {
 	}
 }
 
-func (s *Server) handle(sign Sign, bytes []byte, block uint32) {
+// dup return true if block is duplicated
+func (s *Server) dup(addr string, block uint32) bool {
+	v, ok := s.addrMap.Load(addr)
+	if !ok {
+		return false
+	}
+	p := v.(Peer)
+	r := MonoRange(block)
+	dup := p.Contains(r)
+	if !dup {
+		p.Add(r)
+	}
+	return dup
+}
+
+func (s *Server) handle(sign *Sign, bytes []byte, block uint32) {
 	s.addrMap.Range(func(key, value interface{}) bool {
-		if value.(Sign).Sign == sign.Sign && value.(Sign).UUID != sign.UUID {
+		p := value.(Peer)
+		if p.Sign.Sign == sign.Sign && p.UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
 			go s.dispatch(key.(string), bytes, block)
 		}
@@ -362,13 +395,13 @@ func (s *Server) userNotExist(UUID string) bool {
 
 // dispatch may block by slow connection
 func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
-	ack, ok := s.ackMap.Load(addr)
+	p, ok := s.addrMap.Load(addr)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ack.(*sync.Map).Store(block, cancel)
-	defer ack.(*sync.Map).Delete(block)
+	p.(Peer).Store(block, cancel)
+	defer p.(Peer).Delete(block)
 	defer cancel()
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)

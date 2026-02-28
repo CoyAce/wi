@@ -164,9 +164,13 @@ func TestPubSub(t *testing.T) {
 		if wrq.Filename != "test.txt" {
 			t.Errorf("expected filename \"test.txt\"; actual filename %q", wrq.Filename)
 		}
-		q := <-other.FileMessages
-		if !reflect.DeepEqual(wrq, q) {
-			t.Errorf("expected file message %v; actual file message %v", wrq, q)
+		select {
+		case q := <-other.FileMessages:
+			if !reflect.DeepEqual(wrq, q) {
+				t.Errorf("expected file message %v; actual file message %v", wrq, q)
+			}
+		case <-time.After(10 * time.Millisecond):
+			t.Errorf("timeout")
 		}
 	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
@@ -268,19 +272,28 @@ func TestUnknownUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg := <-receiver.SignedMessages
-	text := string(msg.Payload)
-	if text != "hello" {
-		t.Errorf("expected \"hello\"; actual %q", text)
+	select {
+	case msg := <-receiver.SignedMessages:
+		text := string(msg.Payload)
+		if text != "hello" {
+			t.Errorf("expected \"hello\"; actual %q", text)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
+
 	err = receiver.SendText("hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg = <-sender.SignedMessages
-	text = string(msg.Payload)
-	if text != "hello" {
-		t.Errorf("expected \"hello\"; actual %q", text)
+	select {
+	case msg := <-sender.SignedMessages:
+		text := string(msg.Payload)
+		if text != "hello" {
+			t.Errorf("expected \"hello\"; actual %q", text)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
 }
 

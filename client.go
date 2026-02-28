@@ -23,7 +23,7 @@ type file struct {
 	counter  int
 	createAt time.Time
 	updateAt time.Time
-	rt       *RangeTracker
+	*RangeTracker
 	*updater
 }
 
@@ -55,7 +55,7 @@ func (f *fileWriter) loop() {
 				f.init(req)
 			}
 		case data := <-f.fileData:
-			if !f.isFile(data.FileId) {
+			if !f.isFile(data.FileId) || f.dup(data.FileId, data.Block) {
 				continue
 			}
 			f.tryWrite(data)
@@ -68,7 +68,7 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.counter++
 	req := fd.req
 	fd.data = append(fd.data, data)
-	fd.rt.Add(MonoRange(data.Block))
+	fd.Add(MonoRange(data.Block))
 	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		if fd.elapsed1Second() {
@@ -98,7 +98,7 @@ func (f *file) reset() {
 }
 
 func (f *file) update() {
-	f.updater.update(f.rt.GetProgress(), f.getSpeed())
+	f.updater.update(f.GetProgress(), f.getSpeed())
 }
 
 func (f *file) getSpeed() int {
@@ -107,9 +107,9 @@ func (f *file) getSpeed() int {
 		packetsReceived int
 		speed           float32
 	)
-	if f.rt.isCompleted() {
+	if f.isCompleted() {
 		elapsed = time.Since(f.createAt) / time.Millisecond
-		packetsReceived = int(f.rt.nextBlock() - 1)
+		packetsReceived = int(f.nextBlock() - 1)
 	} else {
 		elapsed = time.Since(f.updateAt) / time.Millisecond
 		packetsReceived = f.counter
@@ -119,7 +119,7 @@ func (f *file) getSpeed() int {
 }
 
 func (f *fileWriter) tryNck(fd file) {
-	if fd.rt.isCompleted() {
+	if fd.isCompleted() {
 		return
 	}
 	f.nck(fd)
@@ -133,13 +133,12 @@ func (f *fileWriter) init(req WriteReq) {
 	if f.isProcessing(req) {
 		return
 	}
-	rt := f.newRangeTracker(req.Size)
 	fd := &file{
-		req:      req,
-		rt:       rt,
-		createAt: time.Now(),
-		updateAt: time.Now(),
-		updater:  f.updaters[req.FileId],
+		req:          req,
+		RangeTracker: f.newRangeTracker(req.Size),
+		createAt:     time.Now(),
+		updateAt:     time.Now(),
+		updater:      f.updaters[req.FileId],
 	}
 	f.files[req.FileId] = fd
 	f.nck(*fd)
@@ -174,7 +173,7 @@ func (f *fileWriter) tryComplete(id uint32) {
 	fd := f.files[id]
 	req := fd.req
 	f.flush(fd, f.getPath(req.UUID, req.Filename))
-	if fd.rt.isCompleted() {
+	if fd.isCompleted() {
 		fd.updateAndReset()
 		f.clean(id)
 		f.fileMessages <- req
@@ -200,7 +199,12 @@ func (f *fileWriter) clean(id uint32) {
 
 func (f *fileWriter) isFile(fileId uint32) bool {
 	fd := f.files[fileId]
-	return fd != nil && fd.req.FileId == fileId
+	return fd != nil
+}
+
+func (f *fileWriter) dup(fileId uint32, block uint32) bool {
+	fd := f.files[fileId]
+	return fd != nil && fd.Contains(MonoRange(block))
 }
 
 func writeTo(filePath string, data []Data) {
@@ -231,8 +235,8 @@ type fileContent struct {
 	fileId     uint32
 	processing bool
 	content    func() (io.ReadSeekCloser, error)
-	reading    RangeTracker
-	pending    RangeTracker
+	reading    *RangeTracker
+	pending    *RangeTracker
 	lock       sync.Mutex
 }
 
@@ -242,7 +246,7 @@ func (f *fileContent) add(ranges []Range) {
 	if f.reading.isCompleted() {
 		f.reading.Set(ranges)
 	} else {
-		tracker := RangeTracker{ranges: ranges}
+		tracker := &RangeTracker{ranges: ranges}
 		tracker.Exclude(f.reading.ranges)
 		f.pending.Merge(tracker)
 	}
@@ -258,7 +262,7 @@ func (f *fileContent) swap() {
 	f.lock.Lock()
 	defer f.lock.Unlock()
 	f.reading = f.pending
-	f.pending = RangeTracker{}
+	f.pending = &RangeTracker{}
 }
 
 func (f *fileContent) isProcessing() bool {
@@ -618,7 +622,7 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 	log.Printf("Send file: %v", fileId)
 
 	if c.contents[fileId] == nil {
-		c.contents[fileId] = &fileContent{fileId: fileId, content: content}
+		c.contents[fileId] = &fileContent{fileId: fileId, content: content, reading: new(RangeTracker), pending: new(RangeTracker)}
 	}
 
 	return c.send(&WriteReq{
@@ -864,7 +868,7 @@ func (c *Client) ack(addr net.Addr, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.rt.GetRanges()}
+	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.GetRanges()}
 	err := c.send(&nck)
 	if err != nil {
 		log.Printf("send nck failed: %v", err)

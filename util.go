@@ -171,17 +171,22 @@ func CombineUint32(high, low uint16) uint32 {
 type RangeTracker struct {
 	latestBlock uint32
 	ranges      []Range
+	rwLock      sync.RWMutex
 }
 
 func (r *RangeTracker) GetProgress() int {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
 	cnt := uint32(0)
 	for _, rng := range r.ranges {
 		cnt += rng.end - rng.start + 1
 	}
-	return 100 - int(float32(cnt)/float32(r.latestBlock-1)*100)
+	return 100 - int(cnt*100/(r.latestBlock-1))
 }
 
 func (r *RangeTracker) Set(ranges []Range) {
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	n := len(ranges)
 	if n > 0 {
 		r.latestBlock = ranges[n-1].end + 1
@@ -189,9 +194,10 @@ func (r *RangeTracker) Set(ranges []Range) {
 	r.ranges = ranges
 }
 
-func (r *RangeTracker) Merge(x RangeTracker) {
-	x.Exclude(r.ranges)
-	for _, rng := range x.ranges {
+func (r *RangeTracker) Merge(x *RangeTracker) {
+	x.Exclude(r.GetRanges())
+
+	for _, rng := range x.GetRanges() {
 		r.add(rng)
 	}
 }
@@ -213,11 +219,15 @@ func (r *RangeTracker) Add(rg Range) {
 		// 考虑丢帧
 		r.add(Range{r.nextBlock(), rg.start - 1})
 	}
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	r.latestBlock = rg.end
 }
 
 // Contains return true if rg is not missing.
 func (r *RangeTracker) Contains(rg Range) bool {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
 	if rg.end >= r.nextBlock() {
 		return false
 	}
@@ -233,12 +243,16 @@ func (r *RangeTracker) Contains(rg Range) bool {
 }
 
 func (r *RangeTracker) GetRanges() []Range {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
 	ret := make([]Range, len(r.ranges))
 	copy(ret, r.ranges)
 	return ret
 }
 
 func (r *RangeTracker) remove(rg Range) {
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	ret := make([]Range, 0, len(r.ranges))
 	for _, v := range r.ranges {
 		if rg.before(v) || rg.after(v) {
@@ -258,14 +272,20 @@ func (r *RangeTracker) remove(rg Range) {
 }
 
 func (r *RangeTracker) add(rg Range) {
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	r.ranges = append(r.ranges, rg)
 }
 
 func (r *RangeTracker) isCompleted() bool {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
 	return len(r.ranges) == 0
 }
 
 func (r *RangeTracker) nextBlock() uint32 {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
 	return r.latestBlock + 1
 }
 
