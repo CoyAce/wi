@@ -392,8 +392,7 @@ type messages struct {
 }
 
 func (m *messages) nextID() uint32 {
-	atomic.AddUint32(&m.MessageCounter, 1)
-	return m.MessageCounter
+	return atomic.AddUint32(&m.MessageCounter, 1)
 }
 
 func newMessages() messages {
@@ -545,10 +544,9 @@ func (c *Client) SendVoice(filename string, duration uint32) error {
 	if err != nil {
 		return err
 	}
-	hash := Hash(unsafe.Pointer(&i))
 	return c.SendFile(func() (io.ReadSeekCloser, error) {
 		return os.Open(filename)
-	}, OpSendVoice, hash, filepath.Base(filename), uint64(i.Size()), duration)
+	}, OpSendVoice, Hash(unsafe.Pointer(&filename)), filepath.Base(filename), uint64(i.Size()), duration)
 }
 
 func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) error {
