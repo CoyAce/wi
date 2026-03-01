@@ -822,7 +822,8 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		switch wrq.Code {
 		case OpAudioCall:
 			c.addAudioStream(wrq)
-			fallthrough
+			c.addAudioReceiver(audioId, wrq)
+			c.FileMessages <- wrq
 		case OpAcceptAudioCall:
 			c.addAudioReceiver(audioId, wrq)
 			if c.isAudioMaker(audioId, c.FullID()) {
