@@ -1,7 +1,9 @@
 package wi
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"log"
 	"net"
@@ -69,35 +71,79 @@ func (s *Server) Serve() error {
 
 func (s *Server) relay(pkt []byte, addr net.Addr) {
 	var (
-		sign   Sign
-		msg    SignedMessage
-		rrq    ReadReq
-		wrq    WriteReq
-		data   = Data{}
-		ack    = Ack{}
-		nck    = Nck{}
-		check  = Check{}
-		ctrl   = CtrlReq{}
-		unsign = OpSignOut
+		b    = bytes.NewBuffer(pkt)
+		code OpCode
 	)
-	switch {
-	case ack.Unmarshal(pkt) == nil:
-		log.Printf("ack received: %v", ack.Block)
-		p, ok := s.addrMap.Load(addr.String())
-		if !ok {
-			log.Printf("unknown ack: %v, addr: %v", ack.Block, addr.String())
+	if binary.Read(b, binary.BigEndian, &code) != nil {
+		return
+	}
+	switch code {
+	case OpSign:
+		sign := new(Sign)
+		if sign.Unmarshal(pkt) != nil {
 			return
 		}
-		cancel, ok := p.(Peer).Load(ack.Block)
+		s.ack(addr, sign.Block)
+		if s.dup(addr.String(), sign.Block) || !s.userSameOrNotExist(sign.UUID, addr.String()) {
+			return
+		}
+		// addr change, remove invalid addr
+		s.removeByUUID(sign.UUID)
+		s.uuidMap.Store(sign.UUID, addr.String())
+		s.addrMap.Store(addr.String(), Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)})
+		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
+	case OpSignOut:
+		s.removeByAddr(addr.String())
+	case OpAck:
+		var block uint32
+		if binary.Read(b, binary.BigEndian, &block) != nil {
+			return
+		}
+		log.Printf("ack received: %v", block)
+		p, ok := s.addrMap.Load(addr.String())
+		if !ok {
+			log.Printf("unknown ack: %v, addr: %v", block, addr.String())
+			return
+		}
+		cancel, ok := p.(Peer).Load(block)
 		if !ok {
 			return
 		}
 		cancel.(context.CancelFunc)()
-	case check.Unmarshal(pkt) == nil:
-		if s.check(addr.String(), check.Block) {
-			s.ack(addr, msg.Block)
+	case OpCheck:
+		var block uint32
+		if binary.Read(b, binary.BigEndian, &block) != nil {
+			return
 		}
-	case msg.Unmarshal(pkt) == nil:
+		if s.check(addr.String(), block) {
+			s.ack(addr, block)
+		}
+	case OpNck:
+		var (
+			block  uint32
+			fileId uint32
+		)
+		if binary.Read(b, binary.BigEndian, &block) != nil {
+			return
+		}
+		if binary.Read(b, binary.BigEndian, &fileId) != nil {
+			return
+		}
+		sn := s.findSignByFileId(fileId)
+		if s.userNotExist(sn.UUID) {
+			s.reject(addr)
+			return
+		}
+		s.ack(addr, block)
+		if s.dup(addr.String(), block) {
+			return
+		}
+		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, block)
+	case OpSignedMSG:
+		msg := new(SignedMessage)
+		if msg.Unmarshal(pkt) != nil {
+			return
+		}
 		if s.userNotExist(msg.Sign.UUID) {
 			s.reject(addr)
 			return
@@ -108,97 +154,90 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		s.handle(&msg.Sign, pkt, msg.Block)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
-	case data.Unmarshal(pkt) == nil:
-		if s.isAudio(data.FileId) {
-			s.handleStreamData(data, pkt, addr)
+	case OpData:
+		var fileId uint32
+		if binary.Read(b, binary.BigEndian, &fileId) != nil {
 			return
 		}
-		if w, ok := s.isContent(data.FileId); ok {
+		if s.isAudio(fileId) {
+			s.handleStreamData(fileId, pkt, addr)
+			return
+		}
+		if w, ok := s.isContent(fileId); ok {
 			s.relayToSubscribers(*w, pkt)
 			return
 		}
-		s.handleFileData(data, pkt)
-	case sign.Unmarshal(pkt) == nil:
-		s.ack(addr, sign.Block)
-		if s.dup(addr.String(), sign.Block) || !s.userSameOrNotExist(sign.UUID, addr.String()) {
-			return
-		}
-		// addr change, remove invalid addr
-		s.removeByUUID(sign.UUID)
-		s.uuidMap.Store(sign.UUID, addr.String())
-		s.addrMap.Store(addr.String(), Peer{Sign: &sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)})
-		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
-	case wrq.Unmarshal(pkt) == nil:
-		if s.userNotExist(wrq.UUID) {
-			s.reject(addr)
-			return
-		}
-		s.ack(addr, wrq.Block)
-		if s.dup(addr.String(), wrq.Block) {
-			return
-		}
-		audioId := s.decodeAudioId(wrq.FileId)
-		switch wrq.Code {
-		case OpAudioCall:
-			s.addAudioStream(wrq)
-			fallthrough
-		case OpAcceptAudioCall:
-			s.addAudioReceiver(audioId, wrq)
-		case OpEndAudioCall:
-			_, ok := s.deleteAudioReceiver(audioId, wrq.UUID)
-			if ok && s.noReceiverLeft(audioId) {
-				s.cleanup(audioId)
+		s.directRelay(s.findSignByFileId(fileId), pkt)
+	default:
+		var (
+			rrq  ReadReq
+			wrq  WriteReq
+			ctrl CtrlReq
+		)
+		switch {
+		case wrq.Unmarshal(pkt) == nil:
+			if s.userNotExist(wrq.UUID) {
+				s.reject(addr)
+				return
 			}
-		case OpPublish:
-			pair := FilePair{FileId: wrq.FileId, UUID: wrq.UUID}
-			s.pubMap.Store(pair, &sync.Map{})
-		case OpContent:
-			s.addFile(wrq)
-			s.dispatchToSubscribers(wrq, pkt)
-			return
-		default:
-			s.addFile(wrq)
+			s.ack(addr, wrq.Block)
+			if s.dup(addr.String(), wrq.Block) {
+				return
+			}
+			audioId := s.decodeAudioId(wrq.FileId)
+			switch wrq.Code {
+			case OpAudioCall:
+				s.addAudioStream(wrq)
+				fallthrough
+			case OpAcceptAudioCall:
+				s.addAudioReceiver(audioId, wrq)
+			case OpEndAudioCall:
+				_, ok := s.deleteAudioReceiver(audioId, wrq.UUID)
+				if ok && s.noReceiverLeft(audioId) {
+					s.cleanup(audioId)
+				}
+			case OpPublish:
+				pair := FilePair{FileId: wrq.FileId, UUID: wrq.UUID}
+				s.pubMap.Store(pair, &sync.Map{})
+			case OpContent:
+				s.addFile(wrq)
+				s.dispatchToSubscribers(wrq, pkt)
+				return
+			default:
+				s.addFile(wrq)
+			}
+			s.handle(s.findSignByUUID(wrq.UUID), pkt, wrq.Block)
+		case rrq.Unmarshal(pkt) == nil:
+			if s.userNotExist(rrq.Subscriber) {
+				s.reject(addr)
+				return
+			}
+			s.ack(addr, rrq.Block)
+			if s.dup(addr.String(), rrq.Block) {
+				return
+			}
+			switch rrq.Code {
+			case OpSubscribe:
+				s.dispatchToPublisher(pkt, rrq)
+			case OpUnsubscribe:
+				s.deleteSub(rrq)
+			default:
+			}
+		case ctrl.Unmarshal(pkt) == nil:
+			if s.userNotExist(ctrl.UUID) {
+				s.reject(addr)
+				return
+			}
+			s.ack(addr, ctrl.Block)
+			if s.dup(addr.String(), ctrl.Block) {
+				return
+			}
+			switch ctrl.Code {
+			case OpSyncName:
+				s.handle(s.findSignByUUID(ctrl.UUID), pkt, ctrl.Block)
+			default:
+			}
 		}
-		s.handle(s.findSignByUUID(wrq.UUID), pkt, wrq.Block)
-	case rrq.Unmarshal(pkt) == nil:
-		if s.userNotExist(rrq.Subscriber) {
-			s.reject(addr)
-			return
-		}
-		s.ack(addr, rrq.Block)
-		if s.dup(addr.String(), rrq.Block) {
-			return
-		}
-		switch rrq.Code {
-		case OpSubscribe:
-			s.dispatchToPublisher(pkt, rrq)
-		case OpUnsubscribe:
-			s.deleteSub(rrq)
-		default:
-		}
-	case nck.Unmarshal(pkt) == nil:
-		sn := s.findSignByFileId(nck.FileId)
-		if s.userNotExist(sn.UUID) {
-			s.reject(addr)
-			return
-		}
-		s.ack(addr, nck.Block)
-		if s.dup(addr.String(), nck.Block) {
-			return
-		}
-		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, nck.Block)
-	case unsign.Unmarshal(pkt) == nil:
-		s.removeByAddr(addr.String())
-	case ctrl.Unmarshal(pkt) == nil:
-		if s.userNotExist(ctrl.UUID) {
-			s.reject(addr)
-			return
-		}
-		s.ack(addr, ctrl.Block)
-		if s.dup(addr.String(), ctrl.Block) {
-			return
-		}
-		s.handle(s.findSignByUUID(ctrl.UUID), pkt, ctrl.Block)
 	}
 }
 
@@ -288,13 +327,13 @@ func (s *Server) removeByAddr(addr string) {
 	}
 }
 
-func (s *Server) handleStreamData(data Data, pkt []byte, sender net.Addr) {
+func (s *Server) handleStreamData(fileId uint32, pkt []byte, sender net.Addr) {
 	p, ok := s.addrMap.Load(sender.String())
 	if !ok {
 		return
 	}
 	UUID := p.(Peer).UUID
-	receivers, ok := s.audioReceiver.Load(s.decodeAudioId(data.FileId))
+	receivers, ok := s.audioReceiver.Load(s.decodeAudioId(fileId))
 	if !ok {
 		return
 	}
@@ -307,11 +346,6 @@ func (s *Server) handleStreamData(data Data, pkt []byte, sender net.Addr) {
 		}
 		return true
 	})
-}
-
-func (s *Server) handleFileData(data Data, pkt []byte) {
-	sign := s.findSignByFileId(data.FileId)
-	s.directRelay(sign, pkt)
 }
 
 func (s *Server) isFinalPacket(n int) bool {
