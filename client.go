@@ -362,10 +362,11 @@ type Client struct {
 }
 
 type Config struct {
-	ServerAddr  string
-	DataDir     string // save config
-	ExternalDir string // save files, e.t. on Android should be /Android/data/...
-	ConfigName  string `json:"-"`
+	ServerAddr     string
+	DataDir        string // save config
+	ExternalDir    string // save files, e.t. on Android should be /Android/data/...
+	ConfigName     string `json:"-"`
+	MessageCounter uint32 // the number of sent messages
 }
 
 type Identity struct {
@@ -383,16 +384,15 @@ type messages struct {
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
-	MessageCounter uint32             // the number of sent messages
-	Retries        uint8              // the number of times to retry a failed transmission
-	Timeout        time.Duration      // the duration to wait for an acknowledgement
+	Retries        uint8              `json:"-"` // the number of times to retry a failed transmission
+	Timeout        time.Duration      `json:"-"` // the duration to wait for an acknowledgement
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
 	trackers       sync.Map           // uuid -> *RangeTracker
 }
 
-func (m *messages) nextID() uint32 {
-	return atomic.AddUint32(&m.MessageCounter, 1)
+func (c *Client) nextID() uint32 {
+	return atomic.AddUint32(&c.MessageCounter, 1)
 }
 
 func newMessages() messages {
