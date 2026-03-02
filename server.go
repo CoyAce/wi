@@ -495,5 +495,6 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 			s.Timeout += s.Timeout * 8 / 100
 		}
 	}
+	s.removeByAddr(addr)
 	log.Printf("[%s] write timeout after %d retries", addr, s.Retries)
 }
