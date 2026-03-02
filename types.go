@@ -105,7 +105,7 @@ func (r *ReadReq) Marshal() ([]byte, error) {
 	b.Grow(size)
 
 	if !rrqSet[r.Code] {
-		return nil, errors.New("invalid RRQ")
+		return nil, InvalidRRQ
 	}
 
 	err := binary.Write(b, binary.BigEndian, r.Code) // write operation code
@@ -145,27 +145,27 @@ func (r *ReadReq) Unmarshal(p []byte) error {
 	}
 
 	if !rrqSet[r.Code] {
-		return INVALID_RRQ
+		return InvalidRRQ
 	}
 
 	err = binary.Read(b, binary.BigEndian, &r.Block) // read block number
 	if err != nil {
-		return INVALID_RRQ
+		return InvalidRRQ
 	}
 
 	err = binary.Read(b, binary.BigEndian, &r.FileId) // read file id
 	if err != nil {
-		return INVALID_RRQ
+		return InvalidRRQ
 	}
 
 	r.Publisher, err = readString(b)
 	if err != nil {
-		return INVALID_RRQ
+		return InvalidRRQ
 	}
 
 	r.Subscriber, err = readString(b)
 	if err != nil {
-		return INVALID_RRQ
+		return InvalidRRQ
 	}
 
 	return nil
@@ -196,7 +196,7 @@ func (q *WriteReq) Marshal() ([]byte, error) {
 	b.Grow(size)
 
 	if !wrqSet[q.Code] {
-		return nil, errors.New("invalid WRQ")
+		return nil, InvalidWRQ
 	}
 
 	err := binary.Write(b, binary.BigEndian, q.Code) // write operation code
@@ -246,37 +246,37 @@ func (q *WriteReq) Unmarshal(p []byte) error {
 	}
 
 	if !wrqSet[q.Code] {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	err = binary.Read(r, binary.BigEndian, &q.Block) // read block number
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	err = binary.Read(r, binary.BigEndian, &q.FileId) // read file id
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	q.UUID, err = readString(r)
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	q.Filename, err = readString(r)
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	err = binary.Read(r, binary.BigEndian, &q.Size) // read size
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	err = binary.Read(r, binary.BigEndian, &q.Duration) // read duration
 	if err != nil {
-		return errors.New("invalid WRQ")
+		return InvalidWRQ
 	}
 
 	return nil
@@ -751,5 +751,6 @@ func (r *Range) Within(v uint32) bool {
 
 var (
 	InvalidData = errors.New("invalid DATA")
-	INVALID_RRQ = errors.New("invalid RRQ")
+	InvalidRRQ  = errors.New("invalid RRQ")
+	InvalidWRQ  = errors.New("invalid WRQ")
 )
