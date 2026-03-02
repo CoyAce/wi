@@ -84,13 +84,16 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.ack(addr, sign.Block)
-		if s.dup(addr.String(), sign.Block) || !s.userSameOrNotExist(sign.UUID, addr.String()) {
+		if s.dup(addr.String(), sign.Block) {
 			return
 		}
+		p := s.updatePeer(sign, addr)
 		// addr change, remove invalid addr
-		s.removeByUUID(sign.UUID)
+		if a, ok := s.uuidMap.Load(sign.UUID); ok && a != addr.String() {
+			s.removeByUUID(sign.UUID)
+		}
 		s.uuidMap.Store(sign.UUID, addr.String())
-		s.addrMap.Store(addr.String(), Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)})
+		s.addrMap.Store(addr.String(), p)
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case OpSignOut:
 		s.removeByAddr(addr.String())
@@ -241,9 +244,13 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 }
 
-func (s *Server) userSameOrNotExist(UUID string, addr string) bool {
-	a := s.findAddrByUUID(UUID)
-	return addr == a || a == ""
+func (s *Server) updatePeer(sign *Sign, addr net.Addr) Peer {
+	p := Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)}
+	if v, ok := s.addrMap.Load(addr.String()); ok {
+		p = v.(Peer)
+		p.Sign = sign
+	}
+	return p
 }
 
 func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {
