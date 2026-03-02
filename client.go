@@ -366,7 +366,6 @@ type Config struct {
 	DataDir     string // save config
 	ExternalDir string // save files, e.t. on Android should be /Android/data/...
 	ConfigName  string `json:"-"`
-	SyncFunc    func() `json:"-"` // e.t. sync icon
 }
 
 type Identity struct {
@@ -678,21 +677,13 @@ func (c *Client) ListenAndServe(addr string) {
 	c.SAddr, err = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
 		// auto reconnect in case of server restart
-		var threshold uint32 = 5
-		once := sync.Once{}
+		c.SendSign()
+		if c.Status != nil {
+			close(c.Status)
+		}
 		for {
-			c.SendSign()
-			once.Do(func() {
-				if c.Status != nil {
-					close(c.Status)
-				}
-			})
-			ok := c.MessageCounter%threshold == 0
-			if ok && c.SyncFunc != nil {
-				threshold++
-				c.SyncFunc()
-			}
 			time.Sleep(30 * time.Second)
+			c.SendSign()
 		}
 	}()
 
