@@ -77,6 +77,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		ack    = Ack{}
 		nck    = Nck{}
 		check  = Check{}
+		ctrl   = CtrlReq{}
 		unsign = OpSignOut
 	)
 	switch {
@@ -119,7 +120,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		s.handleFileData(data, pkt)
 	case sign.Unmarshal(pkt) == nil:
 		s.ack(addr, sign.Block)
-		if s.dup(addr.String(), msg.Block) || s.sameUser(sign.UUID, addr.String()) {
+		if s.dup(addr.String(), sign.Block) || !s.userSameOrNotExist(sign.UUID, addr.String()) {
 			return
 		}
 		// addr change, remove invalid addr
@@ -188,11 +189,22 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, nck.Block)
 	case unsign.Unmarshal(pkt) == nil:
 		s.removeByAddr(addr.String())
+	case ctrl.Unmarshal(pkt) == nil:
+		if s.userNotExist(ctrl.UUID) {
+			s.reject(addr)
+			return
+		}
+		s.ack(addr, ctrl.Block)
+		if s.dup(addr.String(), ctrl.Block) {
+			return
+		}
+		s.handle(s.findSignByUUID(ctrl.UUID), pkt, ctrl.Block)
 	}
 }
 
-func (s *Server) sameUser(UUID string, addr string) bool {
-	return addr == s.findAddrByUUID(UUID)
+func (s *Server) userSameOrNotExist(UUID string, addr string) bool {
+	a := s.findAddrByUUID(UUID)
+	return addr == a || a == ""
 }
 
 func (s *Server) isContent(fileId uint32) (*WriteReq, bool) {

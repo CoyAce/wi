@@ -374,7 +374,7 @@ type Identity struct {
 	Nickname string // user typed nickname
 }
 
-func (i *Identity) FullID() string {
+func (i *Identity) ID() string {
 	return i.Nickname + i.UUID
 }
 
@@ -382,6 +382,7 @@ type messages struct {
 	SignedMessages chan SignedMessage `json:"-"` // text message
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
+	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	MessageCounter uint32             // the number of sent messages
 	Retries        uint8              // the number of times to retry a failed transmission
 	Timeout        time.Duration      // the duration to wait for an acknowledgement
@@ -401,6 +402,7 @@ func newMessages() messages {
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),
 		SubMessages:    make(chan ReadReq, 20),
+		CtrlMessages:   make(chan CtrlReq, 10),
 	}
 }
 
@@ -423,14 +425,14 @@ func newFileMetaInfo(
 ) fileManager {
 	return fileManager{
 		fileReader: &fileReader{
-			req:       make(chan Nck),
+			req:       make(chan Nck, 10),
 			opReady:   opReady,
 			writeOnce: writeOnce,
 			contents:  make(map[uint32]*fileContent),
 		},
 		fileWriter: &fileWriter{
-			wrq:          make(chan WriteReq),
-			fileData:     make(chan Data),
+			wrq:          make(chan WriteReq, 10),
+			fileData:     make(chan Data, 100),
 			dataDir:      externalDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
@@ -569,7 +571,7 @@ func (c *Client) MakeAudioCall(fileId uint32) error {
 
 func (c *Client) EndAudioCall(fileId uint32) error {
 	audioId := GetHigh16(fileId)
-	c.deleteAudioReceiver(audioId, c.FullID())
+	c.deleteAudioReceiver(audioId, c.ID())
 	c.cleanup(audioId)
 	req := c.newAudioReq(OpEndAudioCall, fileId)
 	c.FileMessages <- *req
@@ -581,7 +583,7 @@ func (c *Client) AcceptAudioCall(fileId uint32) error {
 }
 
 func (c *Client) newAudioReq(code OpCode, fileId uint32) *WriteReq {
-	return &WriteReq{Code: code, Block: c.nextID(), FileId: fileId, UUID: c.FullID()}
+	return &WriteReq{Code: code, Block: c.nextID(), FileId: fileId, UUID: c.ID()}
 }
 
 func (c *Client) send(req Req) error {
@@ -597,7 +599,7 @@ func (c *Client) send(req Req) error {
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
-	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.FullID()})
+	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.ID()})
 }
 
 func (c *Client) PublishContent(content func() (io.ReadSeekCloser, error), name string, size uint64, id uint32) error {
@@ -606,13 +608,13 @@ func (c *Client) PublishContent(content func() (io.ReadSeekCloser, error), name 
 
 func (c *Client) SubscribeFile(id uint32, sender string, update func(p int, s int)) error {
 	c.updaters[id] = &updater{update: update}
-	return c.send(&ReadReq{Code: OpSubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
+	return c.send(&ReadReq{Code: OpSubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.ID()})
 }
 
 func (c *Client) UnsubscribeFile(id uint32, sender string) error {
 	// clean OpContent wrq after finished download
 	c.clean(id)
-	return c.send(&ReadReq{Code: OpUnsubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.FullID()})
+	return c.send(&ReadReq{Code: OpUnsubscribe, Block: c.nextID(), FileId: id, Publisher: sender, Subscriber: c.ID()})
 }
 
 func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode, fileId uint32, filename string, size uint64, duration uint32) error {
@@ -626,7 +628,7 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 		Code:     code,
 		Block:    c.nextID(),
 		FileId:   fileId,
-		UUID:     c.FullID(),
+		UUID:     c.ID(),
 		Filename: filename,
 		Size:     size,
 		Duration: duration},
@@ -635,7 +637,7 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 
 func (c *Client) opReady(id uint32) error {
 	log.Printf("send OpReady")
-	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, UUID: c.FullID()})
+	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, UUID: c.ID()})
 }
 
 func (c *Client) writeOnce(data Data) error {
@@ -651,13 +653,25 @@ func (c *Client) writeOnce(data Data) error {
 }
 
 func (c *Client) SendText(text string) error {
-	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.FullID()}, Payload: []byte(text)}
+	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}, Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
 
 	return c.write(pkt, msg.Sign.Block)
+}
+
+func (c *Client) SyncName(oldUUID string) {
+	nameReq := CtrlReq{Code: OpSyncName, Block: c.nextID(), Target: oldUUID, UUID: c.ID()}
+	pkt, err := nameReq.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	err = c.write(pkt, nameReq.Block)
+	if err != nil {
+		log.Printf("sync name: %v", err)
+	}
 }
 
 func (c *Client) ListenAndServe(addr string) {
@@ -698,7 +712,7 @@ func (c *Client) init() {
 
 // SendSign try to write sign to server
 func (c *Client) SendSign() {
-	sign := Sign{0, c.Sign, c.FullID()}
+	sign := Sign{0, c.Sign, c.ID()}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
@@ -711,10 +725,10 @@ func (c *Client) SendSign() {
 }
 
 func (c *Client) SignIn() {
-	sign := Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.FullID()}
+	sign := Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}
 	pkt, err := sign.Marshal()
 	if err != nil {
-		log.Printf("[%s] marshal failed: %v", c.Sign, err)
+		panic(err)
 	}
 	err = c.write(pkt, sign.Block)
 	if err != nil {
@@ -770,6 +784,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		rrq   ReadReq
 		wrq   WriteReq
 		check Check
+		ctrl  CtrlReq
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
@@ -815,7 +830,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.FileMessages <- wrq
 		case OpAcceptAudioCall:
 			c.addAudioReceiver(audioId, wrq)
-			if c.isAudioMaker(audioId, c.FullID()) {
+			if c.isAudioMaker(audioId, c.ID()) {
 				c.FileMessages <- wrq
 			}
 		case OpEndAudioCall:
@@ -823,7 +838,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			if !ok {
 				return
 			}
-			isReceiver := c.isAudioReceiver(audioId, c.FullID())
+			isReceiver := c.isAudioReceiver(audioId, c.ID())
 			if !isReceiver {
 				return
 			}
@@ -857,6 +872,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		if ec == ErrUnknownUser {
 			c.SignIn()
 		}
+	case ctrl.Unmarshal(buf) == nil:
+		c.ack(addr, ctrl.Block)
+		c.CtrlMessages <- ctrl
 	}
 }
 

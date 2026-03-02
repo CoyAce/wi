@@ -25,6 +25,7 @@ const (
 	OpNck
 	OpErr
 	OpSyncIcon
+	OpSyncName
 	OpSendImage
 	OpSendGif
 	OpSendVoice
@@ -458,13 +459,79 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 	return nil
 }
 
+type CtrlReq struct {
+	Code   OpCode
+	Block  uint32
+	Target string
+	UUID   string
+}
+
+func (n *CtrlReq) Marshal() ([]byte, error) {
+	size := 2 + 4 + len(n.Target) + 1 + len(n.UUID) + 1 // operation code  + block number + target UUID + UUID
+
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, n.Code) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, n.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, n.Target) //  write Target
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, n.UUID) //  write UUID
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (n *CtrlReq) Unmarshal(p []byte) error {
+	r := bytes.NewBuffer(p)
+
+	err := binary.Read(r, binary.BigEndian, &n.Code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if n.Code != OpSyncName {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &n.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	n.Target, err = readString(r) // read target uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	n.UUID, err = readString(r) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
+}
+
 type Check struct {
 	Block uint32
 	UUID  string
 }
 
 func (c *Check) Marshal() ([]byte, error) {
-	size := 2 + 4 + len(c.UUID) + 1 // operation code  + block number
+	size := 2 + 4 + len(c.UUID) + 1 // operation code  + block number + uuid
 
 	b := new(bytes.Buffer)
 	b.Grow(size)

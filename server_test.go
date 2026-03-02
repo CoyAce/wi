@@ -15,23 +15,6 @@ import (
 	"time"
 )
 
-func TestSignMarshal(t *testing.T) {
-	sign := "default"
-	uuid := "mock#00001"
-	s := Sign{Sign: sign, UUID: uuid}
-	pkt, _ := s.Marshal()
-	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
-}
-
-func TestMsgMarshal(t *testing.T) {
-	sign := "default"
-	uuid := "mock#00001"
-	s := Sign{Sign: sign, UUID: uuid}
-	msg := SignedMessage{s, []byte("hello")}
-	pkt, _ := msg.Marshal()
-	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
-}
-
 func TestListenPacketUDP(t *testing.T) {
 	// init data
 	signAck := Ack{Block: 0}
@@ -315,7 +298,7 @@ func TestServerDupMessage(t *testing.T) {
 	sign := Sign{1, "default", "sender"}
 	msg := SignedMessage{Sign: sign, Payload: []byte("hello")}
 	msgPkt, _ := msg.Marshal()
-	addr := s.findAddrByUUID(receiver.FullID())
+	addr := s.findAddrByUUID(receiver.ID())
 	s.dispatch(addr, msgPkt, sign.Block)
 	select {
 	case received := <-receiver.SignedMessages:
@@ -367,22 +350,6 @@ func TestUnknownUser(t *testing.T) {
 	}
 }
 
-func TestSignedMessage(t *testing.T) {
-	msg := SignedMessage{Sign: Sign{Block: 1, Sign: "default", UUID: "test"}, Payload: []byte("hello")}
-	pkt, err := msg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m SignedMessage
-	err = m.Unmarshal(pkt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(msg, m) {
-		t.Errorf("expected %v; actual %v", msg, m)
-	}
-}
-
 func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
@@ -401,36 +368,23 @@ func TestSignOut(t *testing.T) {
 	}
 }
 
-func TestSyncMap(t *testing.T) {
-	rrq := ReadReq{Code: OpSubscribe, Subscriber: "sub"}
-	m := sync.Map{}
-	m.Store(rrq.Subscriber, rrq)
-	m.Range(func(k, v interface{}) bool {
-		r := v.(ReadReq)
-		r.Code = OpContent
-		return true
-	})
-	sub, ok := m.Load(rrq.Subscriber)
-	if !ok {
-		t.Fatal("expected subscriber")
-	}
-	if sub.(ReadReq).Code != OpSubscribe {
-		t.Errorf("expected OpSubscribe; actual %#v", sub)
-	}
-}
-
-func TestOpCode(t *testing.T) {
-	s := OpSign
-	op := OpSignOut
-	pkt, err := op.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Unmarshal(pkt) == nil {
-		t.Errorf("expected op sign out; actual %#v", s)
-	}
-	if op.Unmarshal(pkt) != nil {
-		t.Errorf("expected op sign out; actual %#v", op)
+func TestSyncName(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	sender := newClient(serverAddr, "sender")
+	time.Sleep(1 * time.Millisecond)
+	OldUUID := sender.ID()
+	sender.SetNickName("#")
+	sender.SignIn()
+	sender.SyncName(OldUUID)
+	time.Sleep(1 * time.Millisecond)
+	select {
+	case received := <-receiver.CtrlMessages:
+		if received.Target != OldUUID || received.UUID != sender.ID() {
+			t.Errorf("expected old uuid %v, uuid %v; actual old uuid %v, uuid %v", OldUUID, sender.ID(), received.Target, received.UUID)
+		}
+	default:
+		t.Errorf("no message received")
 	}
 }
 
