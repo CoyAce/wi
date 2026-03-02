@@ -38,6 +38,7 @@ const (
 	OpContent
 	OpReady
 	OpCheck
+	OpReadIcon
 )
 
 var wrqSet = map[OpCode]bool{
@@ -58,6 +59,7 @@ var rrqSet = map[OpCode]bool{
 	OpRRQ:         true,
 	OpSubscribe:   true,
 	OpUnsubscribe: true,
+	OpReadIcon:    true,
 }
 
 func (op *OpCode) Marshal() ([]byte, error) {

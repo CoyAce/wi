@@ -220,7 +220,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 				return
 			}
 			switch rrq.Code {
-			case OpSubscribe:
+			case OpSubscribe, OpReadIcon:
 				s.dispatchToPublisher(pkt, rrq)
 			case OpUnsubscribe:
 				s.deleteSub(rrq)
@@ -492,7 +492,7 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 			_, _ = s.conn.WriteTo(pkt, udpAddr)
 		}
 		timer := time.After(s.Timeout)
-		log.Printf("timeout: %v", s.Timeout)
+		log.Printf("current timeout: %v", s.Timeout)
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)

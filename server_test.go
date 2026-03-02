@@ -190,6 +190,7 @@ func TestPubSub(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer f.Close()
 		text, err := io.ReadAll(f)
 		if err != nil {
 			t.Fatal(err)
@@ -385,6 +386,50 @@ func TestSyncName(t *testing.T) {
 		}
 	default:
 		t.Errorf("no message received")
+	}
+}
+
+func TestReadIcon(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	pub := newClient(serverAddr, "pub")
+	sub := newClient(serverAddr, "sub")
+	other := newClient(serverAddr, "other")
+	_ = sub.SendText("ping")
+	_ = other.SendText("pong")
+	_ = sub.ReadIcon(pub.ID())
+	select {
+	case rrq := <-pub.SubMessages:
+		if rrq.Code != OpReadIcon {
+			t.Errorf("expected OpReadIcon; actual opcode %v", rrq.Code)
+		}
+		s := "this is a icon"
+		data := []byte(s)
+		_ = pub.PublishContent(func() (io.ReadSeekCloser, error) {
+			return BytesToReadSeekCloser(data), nil
+		}, "icon.txt", uint64(len(data)), 0)
+		select {
+		case wrq := <-sub.FileMessages:
+			if wrq.Code != OpContent || wrq.FileId != 0 {
+				t.Errorf("expected OpContent; actual opcode %v", wrq.Code)
+			}
+			f, err := os.Open("./test/pub/icon.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			text, err := io.ReadAll(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(text) != s {
+				t.Errorf("expected %q; actual %q", s, string(text))
+			}
+			_ = sub.UnsubscribeFile(0, pub.ID())
+		case <-time.After(10 * time.Millisecond):
+			t.Errorf("timeout")
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
 }
 

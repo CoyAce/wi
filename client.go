@@ -674,6 +674,11 @@ func (c *Client) SyncName(oldUUID string) {
 	}
 }
 
+func (c *Client) ReadIcon(target string) error {
+	// icon file id defaults to 0
+	return c.send(&ReadReq{Code: OpReadIcon, Block: c.nextID(), FileId: 0, Publisher: target, Subscriber: c.ID()})
+}
+
 func (c *Client) ListenAndServe(addr string) {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -812,11 +817,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		if c.dup(rrq.Subscriber, rrq.Block) {
 			return
 		}
-		switch rrq.Code {
-		case OpSubscribe:
-			c.SubMessages <- rrq
-		default:
-		}
+		c.SubMessages <- rrq
 	case wrq.Unmarshal(buf) == nil:
 		c.ack(addr, wrq.Block)
 		if c.dup(wrq.UUID, wrq.Block) {
@@ -949,7 +950,7 @@ func (c *Client) write(bytes []byte, block uint32) error {
 		}
 	WAIT:
 		timer := time.After(c.Timeout)
-		log.Printf("timeout: %v", c.Timeout)
+		log.Printf("current timeout: %v", c.Timeout)
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)
