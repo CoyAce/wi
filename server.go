@@ -26,6 +26,16 @@ func (p Peer) ack(block uint32) {
 	cancel.(context.CancelFunc)()
 }
 
+type history struct {
+	*RangeTracker
+	*sync.Map // block -> packet
+}
+
+func (h *history) add(block uint32, packet []byte) {
+	h.Add(MonoRange(block))
+	h.Store(block, packet)
+}
+
 type Server struct {
 	Status  chan struct{} `json:"-"` // initialization status
 	Retries uint8         // the number of times to retry a failed transmission
@@ -33,6 +43,7 @@ type Server struct {
 	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	addrMap sync.Map      // addr -> Peer
 	uuidMap sync.Map      // uuid -> addr
+	history sync.Map      // sign -> *sync.Map { uuid -> *history }
 	*audioManager
 	conn net.PacketConn
 }
@@ -102,6 +113,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), p)
+		h, _ := s.history.LoadOrStore(sign.Sign, new(sync.Map))
+		h.(*sync.Map).LoadOrStore(sign.UUID, &history{RangeTracker: new(RangeTracker), Map: new(sync.Map)})
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case OpSignOut:
 		s.removeByAddr(addr.String())
@@ -135,7 +148,10 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if binary.Read(b, binary.BigEndian, &fileId) != nil {
 			return
 		}
-		sn := s.findSignByFileId(fileId)
+		sn, ok := s.findSignByFileId(fileId)
+		if !ok {
+			return
+		}
 		if s.userNotExist(sn.UUID) {
 			s.reject(addr)
 			return
@@ -158,7 +174,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.dup(addr.String(), msg.Block) {
 			return
 		}
-		s.handle(&msg.Sign, pkt, msg.Block)
+		s.store(&msg.Sign, msg.Block, pkt)
+		s.handle(&msg.Sign, msg.Block, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case OpData:
 		var fileId uint32
@@ -173,7 +190,11 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			s.relayToSubscribers(*w, pkt)
 			return
 		}
-		s.directRelay(s.findSignByFileId(fileId), pkt)
+		sign, ok := s.findSignByFileId(fileId)
+		if !ok {
+			return
+		}
+		s.directRelay(sign, pkt)
 	default:
 		var (
 			rrq  ReadReq
@@ -212,7 +233,16 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			default:
 				s.addFile(wrq)
 			}
-			s.handle(s.findSignByUUID(wrq.UUID), pkt, wrq.Block)
+			sign, ok := s.findSignByUUID(wrq.UUID)
+			if !ok {
+				return
+			}
+			switch wrq.Code {
+			case OpSendImage, OpSendGif, OpSendVoice, OpPublish, OpSyncIcon:
+				s.store(sign, wrq.Block, pkt)
+			default:
+			}
+			s.handle(sign, wrq.Block, pkt)
 		case rrq.Unmarshal(pkt) == nil:
 			if s.userNotExist(rrq.Subscriber) {
 				s.reject(addr)
@@ -238,11 +268,24 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			if s.dup(addr.String(), ctrl.Block) {
 				return
 			}
+			sign, ok := s.findSignByUUID(ctrl.UUID)
+			if !ok {
+				return
+			}
 			switch ctrl.Code {
 			case OpSyncName:
-				s.handle(s.findSignByUUID(ctrl.UUID), pkt, ctrl.Block)
+				s.store(sign, ctrl.Block, pkt)
+				s.handle(sign, ctrl.Block, pkt)
 			default:
 			}
+		}
+	}
+}
+
+func (s *Server) store(sign *Sign, block uint32, pkt []byte) {
+	if h, ok := s.history.Load(sign.Sign); ok {
+		if r, ok := h.(*sync.Map).Load(sign.UUID); ok {
+			r.(*history).add(block, pkt)
 		}
 	}
 }
@@ -388,16 +431,16 @@ func (s *Server) init() {
 	s.audioManager = &audioManager{}
 }
 
-func (s *Server) findSignByUUID(uuid string) *Sign {
+func (s *Server) findSignByUUID(uuid string) (*Sign, bool) {
 	addr, ok := s.uuidMap.Load(uuid)
 	if !ok {
-		return &Sign{UUID: uuid}
+		return nil, false
 	}
 	p, ok := s.addrMap.Load(addr)
 	if !ok {
-		return &Sign{UUID: uuid}
+		return nil, false
 	}
-	return p.(Peer).Sign
+	return p.(Peer).Sign, true
 }
 
 func (s *Server) findAddrByUUID(uuid string) string {
@@ -408,10 +451,10 @@ func (s *Server) findAddrByUUID(uuid string) string {
 	return ""
 }
 
-func (s *Server) findSignByFileId(fileId uint32) *Sign {
+func (s *Server) findSignByFileId(fileId uint32) (*Sign, bool) {
 	wrq, ok := s.fileMap.Load(fileId)
 	if !ok {
-		return &Sign{}
+		return nil, false
 	}
 	UUID := wrq.(WriteReq).UUID
 	return s.findSignByUUID(UUID)
@@ -450,7 +493,7 @@ func (s *Server) check(addr string, block uint32) bool {
 	return v.(Peer).Contains(MonoRange(block))
 }
 
-func (s *Server) handle(sign *Sign, bytes []byte, block uint32) {
+func (s *Server) handle(sign *Sign, block uint32, bytes []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign.Sign == sign.Sign && p.UUID != sign.UUID {
