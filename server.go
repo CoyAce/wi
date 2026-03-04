@@ -15,12 +15,12 @@ type Peer struct {
 	*Sign         // identity
 	*sync.Map     // block -> CancelFunc
 	*RangeTracker // block tracker
+	Timeout       *time.Duration
 }
 
 type Server struct {
 	Status  chan struct{} `json:"-"` // initialization status
 	Retries uint8         // the number of times to retry a failed transmission
-	Timeout time.Duration // the duration to wait for an acknowledgement
 	fileMap sync.Map      // fileId -> wrq
 	pubMap  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	addrMap sync.Map      // addr -> Peer
@@ -245,7 +245,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 }
 
 func (s *Server) updatePeer(sign *Sign, addr net.Addr) Peer {
-	p := Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker)}
+	timeout := 500 * time.Millisecond
+	p := Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), Timeout: &timeout}
 	if v, ok := s.addrMap.Load(addr.String()); ok {
 		p = v.(Peer)
 		p.Sign = sign
@@ -381,10 +382,6 @@ func (s *Server) init() {
 		s.Retries = 18
 	}
 
-	if s.Timeout == 0 {
-		s.Timeout = 500 * time.Millisecond
-	}
-
 	s.audioManager = &audioManager{}
 }
 
@@ -491,15 +488,15 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 			pkt, _ := check.Marshal()
 			_, _ = s.conn.WriteTo(pkt, udpAddr)
 		}
-		timer := time.After(s.Timeout)
-		log.Printf("current timeout: %v", s.Timeout)
+		timer := time.After(*p.Timeout)
+		log.Printf("[%v] current timeout: %v", addr, p.Timeout)
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)
-			s.Timeout = s.Timeout*8/10 + elapsed*2/10
+			*p.Timeout = *p.Timeout*8/10 + elapsed*2/10
 			return
 		case <-timer:
-			s.Timeout += s.Timeout * 8 / 100
+			*p.Timeout += *p.Timeout * 8 / 100
 		}
 	}
 	s.removeByAddr(addr)
