@@ -18,6 +18,14 @@ type Peer struct {
 	Timeout       *time.Duration
 }
 
+func (p Peer) ack(block uint32) {
+	cancel, ok := p.Load(block)
+	if !ok {
+		return
+	}
+	cancel.(context.CancelFunc)()
+}
+
 type Server struct {
 	Status  chan struct{} `json:"-"` // initialization status
 	Retries uint8         // the number of times to retry a failed transmission
@@ -103,16 +111,11 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		log.Printf("ack received: %v", block)
-		p, ok := s.addrMap.Load(addr.String())
-		if !ok {
+		if p, ok := s.addrMap.Load(addr.String()); ok {
+			p.(Peer).ack(block)
+		} else {
 			log.Printf("unknown ack: %v, addr: %v", block, addr.String())
-			return
 		}
-		cancel, ok := p.(Peer).Load(block)
-		if !ok {
-			return
-		}
-		cancel.(context.CancelFunc)()
 	case OpCheck:
 		var block uint32
 		if binary.Read(b, binary.BigEndian, &block) != nil {
@@ -492,8 +495,8 @@ func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
 		log.Printf("[%v] current timeout: %v", addr, p.Timeout)
 		select {
 		case <-ctx.Done():
-			elapsed := time.Since(start)
-			*p.Timeout = *p.Timeout*8/10 + elapsed*2/10
+			roundTrip := time.Since(start)
+			*p.Timeout = *p.Timeout*8/10 + roundTrip*2/10
 			return
 		case <-timer:
 			*p.Timeout += *p.Timeout * 8 / 100
