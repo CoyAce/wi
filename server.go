@@ -414,10 +414,6 @@ func (s *Server) handleStreamData(fileId uint32, pkt []byte, sender net.Addr) {
 	})
 }
 
-func (s *Server) isFinalPacket(n int) bool {
-	return n < DatagramSize
-}
-
 func (s *Server) directRelay(sign *SignBody, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
