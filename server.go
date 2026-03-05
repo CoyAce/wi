@@ -281,8 +281,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 }
 
 func (s *Server) track(sign *SignBody, block uint32, pkt []byte) {
-	h := s.loadHistory(sign)
-	h.add(block, pkt)
+	s.loadHistory(sign).add(block, pkt)
 }
 
 func (s *Server) loadHistorySet(sign string) *sync.Map {

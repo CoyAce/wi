@@ -387,6 +387,7 @@ type messages struct {
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	Retries        uint8              `json:"-"` // the number of times to retry a failed transmission
 	Timeout        time.Duration      `json:"-"` // the duration to wait for an acknowledgement
+	history        sync.Map           // sign -> *sync.Map { uuid -> *RangeTracker }
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
 	trackers       sync.Map           // uuid -> *RangeTracker
@@ -682,6 +683,31 @@ func (c *Client) ReadIcon(target string) error {
 	return c.send(&ReadReq{Code: OpReadIcon, Block: c.nextID(), FileId: 0, Publisher: target, Subscriber: c.ID()})
 }
 
+func (c *Client) Track(sign *SignBody, block uint32) {
+	c.loadRangeTracker(sign).add(MonoRange(block))
+}
+
+func (c *Client) pull() {
+
+}
+
+func (c *Client) loadHistorySet(sign string) *sync.Map {
+	if h, ok := c.history.Load(sign); ok {
+		return h.(*sync.Map)
+	}
+	h, _ := c.history.LoadOrStore(sign, new(sync.Map))
+	return h.(*sync.Map)
+}
+
+func (c *Client) loadRangeTracker(sign *SignBody) *RangeTracker {
+	hs := c.loadHistorySet(sign.Sign)
+	if h, ok := hs.Load(sign.UUID); ok {
+		return h.(*RangeTracker)
+	}
+	h, _ := hs.LoadOrStore(sign.UUID, new(RangeTracker))
+	return h.(*RangeTracker)
+}
+
 func (c *Client) ListenAndServe(addr string) {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -706,6 +732,7 @@ func (c *Client) ListenAndServe(addr string) {
 		for {
 			time.Sleep(30 * time.Second)
 			c.SendSign()
+			c.pull()
 		}
 	}()
 
