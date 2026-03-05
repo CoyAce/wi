@@ -883,9 +883,8 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 }
 
 func (c *Client) dup(UUID string, block uint32) bool {
-	v, _ := c.trackers.LoadOrStore(UUID, new(RangeTracker))
+	t := c.loadTracker(UUID)
 	r := MonoRange(block)
-	t := v.(*RangeTracker)
 	dup := t.Contains(r)
 	if !dup {
 		t.Add(r)
@@ -893,10 +892,17 @@ func (c *Client) dup(UUID string, block uint32) bool {
 	return dup
 }
 
-func (c *Client) check(UUID string, block uint32) bool {
+func (c *Client) loadTracker(UUID string) *RangeTracker {
+	if v, ok := c.trackers.Load(UUID); ok {
+		return v.(*RangeTracker)
+	}
 	v, _ := c.trackers.LoadOrStore(UUID, new(RangeTracker))
-	r := MonoRange(block)
-	return v.(*RangeTracker).Contains(r)
+	return v.(*RangeTracker)
+}
+
+func (c *Client) check(UUID string, block uint32) bool {
+	t := c.loadTracker(UUID)
+	return t.Contains(MonoRange(block))
 }
 
 func (c *Client) ack(addr net.Addr, block uint32) {

@@ -113,8 +113,6 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		s.uuidMap.Store(sign.UUID, addr.String())
 		s.addrMap.Store(addr.String(), p)
-		h, _ := s.history.LoadOrStore(sign.Sign, new(sync.Map))
-		h.(*sync.Map).LoadOrStore(sign.UUID, &history{RangeTracker: new(RangeTracker), Map: new(sync.Map)})
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case OpSignOut:
 		s.removeByAddr(addr.String())
@@ -174,7 +172,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.dup(addr.String(), msg.Block) {
 			return
 		}
-		s.store(&msg.Sign, msg.Block, pkt)
+		s.track(&msg.Sign, msg.Block, pkt)
 		s.handle(&msg.Sign, msg.Block, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case OpData:
@@ -239,7 +237,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			}
 			switch wrq.Code {
 			case OpSendImage, OpSendGif, OpSendVoice, OpPublish, OpSyncIcon:
-				s.store(sign, wrq.Block, pkt)
+				s.track(sign, wrq.Block, pkt)
 			default:
 			}
 			s.handle(sign, wrq.Block, pkt)
@@ -274,7 +272,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			}
 			switch ctrl.Code {
 			case OpSyncName:
-				s.store(sign, ctrl.Block, pkt)
+				s.track(sign, ctrl.Block, pkt)
 				s.handle(sign, ctrl.Block, pkt)
 			default:
 			}
@@ -282,12 +280,26 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 }
 
-func (s *Server) store(sign *Sign, block uint32, pkt []byte) {
-	if h, ok := s.history.Load(sign.Sign); ok {
-		if r, ok := h.(*sync.Map).Load(sign.UUID); ok {
-			r.(*history).add(block, pkt)
-		}
+func (s *Server) track(sign *Sign, block uint32, pkt []byte) {
+	h := s.loadHistory(sign)
+	h.add(block, pkt)
+}
+
+func (s *Server) loadHistorySet(sign string) *sync.Map {
+	if h, ok := s.history.Load(sign); ok {
+		return h.(*sync.Map)
 	}
+	h, _ := s.history.LoadOrStore(sign, new(sync.Map))
+	return h.(*sync.Map)
+}
+
+func (s *Server) loadHistory(sign *Sign) *history {
+	hs := s.loadHistorySet(sign.Sign)
+	if h, ok := hs.Load(sign.UUID); ok {
+		return h.(*history)
+	}
+	h, _ := hs.LoadOrStore(sign.UUID, &history{RangeTracker: new(RangeTracker), Map: new(sync.Map)})
+	return h.(*history)
 }
 
 func (s *Server) updatePeer(sign *Sign, addr net.Addr) Peer {
