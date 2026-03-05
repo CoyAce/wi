@@ -126,7 +126,8 @@ func (f *fileWriter) tryNck(fd file) {
 }
 
 func (f *fileWriter) received256kb(fd *file) bool {
-	return len(fd.data) >= 256*1024/BlockSize
+	const size = 256 * 1024 / BlockSize
+	return len(fd.data) >= size
 }
 
 func (f *fileWriter) init(req WriteReq) {
@@ -432,7 +433,7 @@ func newFileMetaInfo(
 		},
 		fileWriter: &fileWriter{
 			wrq:          make(chan WriteReq, 10),
-			fileData:     make(chan Data, 100),
+			fileData:     make(chan Data, 200),
 			dataDir:      externalDir,
 			fileMessages: fileMessages,
 			files:        make(map[uint32]*file),
