@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestSignMarshal(t *testing.T) {
@@ -18,7 +19,7 @@ func TestMsgMarshal(t *testing.T) {
 	sign := "default"
 	uuid := "mock#00001"
 	s := Sign{Sign: sign, UUID: uuid}
-	msg := SignedMessage{s, []byte("hello")}
+	msg := SignedMessage{s, time.Now().UnixMilli(), []byte("hello")}
 	pkt, _ := msg.Marshal()
 	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
 }

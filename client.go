@@ -599,7 +599,7 @@ func (c *Client) send(req Req) error {
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
-	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.ID()})
+	return c.send(&WriteReq{Code: OpPublish, Block: c.nextID(), FileId: id, Filename: name, Size: size, UUID: c.ID(), CreatedAt: time.Now().UnixMilli()})
 }
 
 func (c *Client) PublishContent(content func() (io.ReadSeekCloser, error), name string, size uint64, id uint32) error {
@@ -625,13 +625,15 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 	}
 
 	return c.send(&WriteReq{
-		Code:     code,
-		Block:    c.nextID(),
-		FileId:   fileId,
-		UUID:     c.ID(),
-		Filename: filename,
-		Size:     size,
-		Duration: duration},
+		Code:      code,
+		Block:     c.nextID(),
+		FileId:    fileId,
+		UUID:      c.ID(),
+		Filename:  filename,
+		Size:      size,
+		Duration:  duration,
+		CreatedAt: time.Now().UnixMilli(),
+	},
 	)
 }
 
@@ -653,7 +655,7 @@ func (c *Client) writeOnce(data Data) error {
 }
 
 func (c *Client) SendText(text string) error {
-	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}, Payload: []byte(text)}
+	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}, CreatedAt: time.Now().UnixMilli(), Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		return err

@@ -180,13 +180,14 @@ type FilePair struct {
 }
 
 type WriteReq struct {
-	Code     OpCode
-	Block    uint32
-	FileId   uint32
-	UUID     string
-	Filename string
-	Size     uint64
-	Duration uint32
+	Code      OpCode
+	Block     uint32
+	FileId    uint32
+	UUID      string
+	Filename  string
+	Size      uint64
+	Duration  uint32
+	CreatedAt int64
 }
 
 func (q *WriteReq) ID() uint32 {
@@ -237,6 +238,11 @@ func (q *WriteReq) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
+	err = binary.Write(b, binary.BigEndian, q.CreatedAt) // write create time
+	if err != nil {
+		return nil, err
+	}
+
 	return b.Bytes(), nil
 }
 
@@ -278,6 +284,11 @@ func (q *WriteReq) Unmarshal(p []byte) error {
 	}
 
 	err = binary.Read(r, binary.BigEndian, &q.Duration) // read duration
+	if err != nil {
+		return InvalidWRQ
+	}
+
+	err = binary.Read(r, binary.BigEndian, &q.CreatedAt) // read create time
 	if err != nil {
 		return InvalidWRQ
 	}
@@ -405,7 +416,8 @@ func (sign *Sign) Unmarshal(p []byte) error {
 
 type SignedMessage struct {
 	Sign
-	Payload []byte
+	CreatedAt int64
+	Payload   []byte
 }
 
 func (m *SignedMessage) Marshal() ([]byte, error) {
@@ -426,6 +438,11 @@ func (m *SignedMessage) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	b.Write(sign[2:])
+
+	err = binary.Write(b, binary.BigEndian, m.CreatedAt) // write create time
+	if err != nil {
+		return nil, err
+	}
 
 	b.Write(m.Payload)
 	return b.Bytes(), nil
@@ -453,6 +470,11 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 	}
 
 	m.Sign.UUID, err = readString(r)
+	if err != nil {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &m.CreatedAt) // read create time
 	if err != nil {
 		return InvalidData
 	}
