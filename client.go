@@ -656,13 +656,13 @@ func (c *Client) writeOnce(data Data) error {
 }
 
 func (c *Client) SendText(text string) error {
-	msg := SignedMessage{Sign: Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}, CreatedAt: time.Now().UnixMilli(), Payload: []byte(text)}
+	msg := SignedMessage{SignReq: SignReq{Block: c.nextID(), SignBody: SignBody{Sign: c.Sign, UUID: c.ID()}}, CreatedAt: time.Now().UnixMilli(), Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		return err
 	}
 
-	return c.write(pkt, msg.Sign.Block)
+	return c.write(pkt, msg.SignReq.Block)
 }
 
 func (c *Client) SyncName(oldUUID string) {
@@ -720,7 +720,7 @@ func (c *Client) init() {
 
 // SendSign try to write sign to server
 func (c *Client) SendSign() {
-	sign := Sign{0, c.Sign, c.ID()}
+	sign := SignReq{0, SignBody{c.Sign, c.ID()}}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
@@ -733,7 +733,7 @@ func (c *Client) SendSign() {
 }
 
 func (c *Client) SignIn() {
-	sign := Sign{Block: c.nextID(), Sign: c.Sign, UUID: c.ID()}
+	sign := SignReq{c.nextID(), SignBody{c.Sign, c.ID()}}
 	pkt, err := sign.Marshal()
 	if err != nil {
 		panic(err)
@@ -813,7 +813,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			return
 		}
 		s := string(msg.Payload)
-		log.Printf("Receiving text [%s] from [%s]\n", s, msg.Sign.UUID)
+		log.Printf("Receiving text [%s] from [%s]\n", s, msg.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
 		c.ack(addr, rrq.Block)

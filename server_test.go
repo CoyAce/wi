@@ -25,14 +25,14 @@ func TestListenPacketUDP(t *testing.T) {
 	sign := "test"
 
 	uuid := "#00001"
-	clientSign := Sign{0, sign, uuid}
+	clientSign := SignReq{0, SignBody{sign, uuid}}
 	clientSignPkt, _ := clientSign.Marshal()
 	t.Logf("sign pkt: [%v]", hex.EncodeToString(clientSignPkt))
 
 	uuidA := "#00002"
 
 	text := "hello beautiful world"
-	clientMsg := SignedMessage{Sign: clientSign, Payload: []byte(text)}
+	clientMsg := SignedMessage{SignReq: clientSign, Payload: []byte(text)}
 	clientMsgPkt, err := clientMsg.Marshal()
 
 	textA := "beautiful world"
@@ -256,7 +256,7 @@ func TestClientDupMessage(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// send sign
-	sign := Sign{1, "default", "sender"}
+	sign := SignReq{1, SignBody{"default", "sender"}}
 	signPkt, _ := sign.Marshal()
 
 	sAddr, _ := net.ResolveUDPAddr("udp", serverAddr)
@@ -269,7 +269,7 @@ func TestClientDupMessage(t *testing.T) {
 	_ = client.SetReadDeadline(time.Now().Add(time.Second))
 	_, _, _ = client.ReadFrom(buf)
 
-	msg := SignedMessage{Sign: sign, Payload: []byte("hello")}
+	msg := SignedMessage{SignReq: sign, Payload: []byte("hello")}
 	msgPkt, _ := msg.Marshal()
 	_, _ = client.WriteTo(msgPkt, sAddr)
 	_ = client.SetReadDeadline(time.Now().Add(time.Second))
@@ -296,8 +296,8 @@ func TestServerDupMessage(t *testing.T) {
 	s, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
 	_ = receiver.SendText("sync")
-	sign := Sign{1, "default", "sender"}
-	msg := SignedMessage{Sign: sign, Payload: []byte("hello")}
+	sign := SignReq{1, SignBody{"default", "sender"}}
+	msg := SignedMessage{SignReq: sign, Payload: []byte("hello")}
 	msgPkt, _ := msg.Marshal()
 	addr := s.findAddrByUUID(receiver.ID())
 	s.dispatch(addr, msgPkt, sign.Block)

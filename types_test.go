@@ -10,7 +10,7 @@ import (
 func TestSignMarshal(t *testing.T) {
 	sign := "default"
 	uuid := "mock#00001"
-	s := Sign{Sign: sign, UUID: uuid}
+	s := SignReq{0, SignBody{Sign: sign, UUID: uuid}}
 	pkt, _ := s.Marshal()
 	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
 }
@@ -18,7 +18,7 @@ func TestSignMarshal(t *testing.T) {
 func TestMsgMarshal(t *testing.T) {
 	sign := "default"
 	uuid := "mock#00001"
-	s := Sign{Sign: sign, UUID: uuid}
+	s := SignReq{0, SignBody{Sign: sign, UUID: uuid}}
 	msg := SignedMessage{s, time.Now().UnixMilli(), []byte("hello")}
 	pkt, _ := msg.Marshal()
 	t.Logf("pkt: [%v]", hex.EncodeToString(pkt))
@@ -272,7 +272,7 @@ func TestCtrlReq(t *testing.T) {
 }
 
 func TestSignedMessage(t *testing.T) {
-	msg := SignedMessage{Sign: Sign{Block: 1, Sign: "default", UUID: "test"}, Payload: []byte("hello")}
+	msg := SignedMessage{SignReq: SignReq{1, SignBody{Sign: "default", UUID: "test"}}, Payload: []byte("hello")}
 	pkt, err := msg.Marshal()
 	if err != nil {
 		t.Fatal(err)

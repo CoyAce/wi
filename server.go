@@ -12,7 +12,7 @@ import (
 )
 
 type Peer struct {
-	*Sign         // identity
+	*SignBody     // identity
 	*sync.Map     // block -> CancelFunc
 	*RangeTracker // block tracker
 	Timeout       *time.Duration
@@ -98,7 +98,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 	switch code {
 	case OpSign:
-		sign := new(Sign)
+		sign := new(SignReq)
 		if sign.Unmarshal(pkt) != nil {
 			return
 		}
@@ -106,7 +106,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.dup(addr.String(), sign.Block) {
 			return
 		}
-		p := s.updatePeer(sign, addr)
+		p := s.updatePeer(&sign.SignBody, addr)
 		// addr change, remove invalid addr
 		if a, ok := s.uuidMap.Load(sign.UUID); ok && a != addr.String() {
 			s.removeByUUID(sign.UUID)
@@ -164,7 +164,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if msg.Unmarshal(pkt) != nil {
 			return
 		}
-		if s.userNotExist(msg.Sign.UUID) {
+		if s.userNotExist(msg.UUID) {
 			s.reject(addr)
 			return
 		}
@@ -172,8 +172,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.dup(addr.String(), msg.Block) {
 			return
 		}
-		s.track(&msg.Sign, msg.Block, pkt)
-		s.handle(&msg.Sign, msg.Block, pkt)
+		s.track(&msg.SignBody, msg.Block, pkt)
+		s.handle(&msg.SignBody, msg.Block, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case OpData:
 		var fileId uint32
@@ -280,7 +280,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 }
 
-func (s *Server) track(sign *Sign, block uint32, pkt []byte) {
+func (s *Server) track(sign *SignBody, block uint32, pkt []byte) {
 	h := s.loadHistory(sign)
 	h.add(block, pkt)
 }
@@ -293,7 +293,7 @@ func (s *Server) loadHistorySet(sign string) *sync.Map {
 	return h.(*sync.Map)
 }
 
-func (s *Server) loadHistory(sign *Sign) *history {
+func (s *Server) loadHistory(sign *SignBody) *history {
 	hs := s.loadHistorySet(sign.Sign)
 	if h, ok := hs.Load(sign.UUID); ok {
 		return h.(*history)
@@ -302,12 +302,12 @@ func (s *Server) loadHistory(sign *Sign) *history {
 	return h.(*history)
 }
 
-func (s *Server) updatePeer(sign *Sign, addr net.Addr) Peer {
+func (s *Server) updatePeer(sign *SignBody, addr net.Addr) Peer {
 	timeout := 500 * time.Millisecond
-	p := Peer{Sign: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), Timeout: &timeout}
+	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), Timeout: &timeout}
 	if v, ok := s.addrMap.Load(addr.String()); ok {
 		p = v.(Peer)
-		p.Sign = sign
+		p.SignBody = sign
 	}
 	return p
 }
@@ -418,10 +418,10 @@ func (s *Server) isFinalPacket(n int) bool {
 	return n < DatagramSize
 }
 
-func (s *Server) directRelay(sign *Sign, pkt []byte) {
+func (s *Server) directRelay(sign *SignBody, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
-		if p.Sign.Sign == sign.Sign && p.UUID != sign.UUID {
+		if p.Sign == sign.Sign && p.UUID != sign.UUID {
 			go func() {
 				addr, _ := net.ResolveUDPAddr("udp", key.(string))
 				_, _ = s.conn.WriteTo(pkt, addr)
@@ -443,7 +443,7 @@ func (s *Server) init() {
 	s.audioManager = &audioManager{}
 }
 
-func (s *Server) findSignByUUID(uuid string) (*Sign, bool) {
+func (s *Server) findSignByUUID(uuid string) (*SignBody, bool) {
 	addr, ok := s.uuidMap.Load(uuid)
 	if !ok {
 		return nil, false
@@ -452,7 +452,7 @@ func (s *Server) findSignByUUID(uuid string) (*Sign, bool) {
 	if !ok {
 		return nil, false
 	}
-	return p.(Peer).Sign, true
+	return p.(Peer).SignBody, true
 }
 
 func (s *Server) findAddrByUUID(uuid string) string {
@@ -463,7 +463,7 @@ func (s *Server) findAddrByUUID(uuid string) string {
 	return ""
 }
 
-func (s *Server) findSignByFileId(fileId uint32) (*Sign, bool) {
+func (s *Server) findSignByFileId(fileId uint32) (*SignBody, bool) {
 	wrq, ok := s.fileMap.Load(fileId)
 	if !ok {
 		return nil, false
@@ -505,10 +505,10 @@ func (s *Server) check(addr string, block uint32) bool {
 	return v.(Peer).Contains(MonoRange(block))
 }
 
-func (s *Server) handle(sign *Sign, block uint32, bytes []byte) {
+func (s *Server) handle(sign *SignBody, block uint32, bytes []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
-		if p.Sign.Sign == sign.Sign && p.UUID != sign.UUID {
+		if p.Sign == sign.Sign && p.UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
 			go s.dispatch(key.(string), bytes, block)
 		}
