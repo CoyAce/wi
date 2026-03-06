@@ -6,8 +6,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"log"
+	"math"
 	"net"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,8 +21,8 @@ type Peer struct {
 	Timeout       *time.Duration
 }
 
-func (p Peer) ack(block uint32) {
-	cancel, ok := p.Load(block)
+func (p Peer) ack(cacheKey string) {
+	cancel, ok := p.Load(cacheKey)
 	if !ok {
 		return
 	}
@@ -32,7 +35,7 @@ type history struct {
 }
 
 func (h *history) add(block uint32, packet []byte) {
-	h.Add(MonoRange(block))
+	h.Track(MonoRange(block))
 	h.Store(block, packet)
 }
 
@@ -45,13 +48,18 @@ type Server struct {
 	uuidMap sync.Map      // uuid -> addr
 	history sync.Map      // sign -> *sync.Map { uuid -> *history }
 	*audioManager
-	conn net.PacketConn
+	counter uint32
+	conn    net.PacketConn
 }
 
 func (s *Server) Ready() {
 	if s.Status != nil {
 		<-s.Status
 	}
+}
+
+func (s *Server) nextID() uint32 {
+	return atomic.AddUint32(&s.counter, 1)
 }
 
 func (s *Server) ListenAndServe(addr string) error {
@@ -97,6 +105,14 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		return
 	}
 	switch code {
+	case OpNck, OpSignedMSG, OpPull, OpDiscovery:
+		if _, ok := s.addrMap.Load(addr.String()); !ok {
+			s.reject(addr)
+			return
+		}
+	default:
+	}
+	switch code {
 	case OpSign:
 		sign := new(SignReq)
 		if sign.Unmarshal(pkt) != nil {
@@ -117,15 +133,13 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	case OpSignOut:
 		s.removeByAddr(addr.String())
 	case OpAck:
-		var block uint32
-		if binary.Read(b, binary.BigEndian, &block) != nil {
+		var ack Ack
+		if ack.Unmarshal(pkt) != nil {
 			return
 		}
-		log.Printf("ack received: %v", block)
+		log.Printf("ack received: %v", ack.Block)
 		if p, ok := s.addrMap.Load(addr.String()); ok {
-			p.(Peer).ack(block)
-		} else {
-			log.Printf("unknown ack: %v, addr: %v", block, addr.String())
+			p.(Peer).ack(s.cacheKey(ack.UUID, ack.Block))
 		}
 	case OpCheck:
 		var block uint32
@@ -143,37 +157,31 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if binary.Read(b, binary.BigEndian, &block) != nil {
 			return
 		}
-		if binary.Read(b, binary.BigEndian, &fileId) != nil {
-			return
-		}
-		sn, ok := s.findSignByFileId(fileId)
-		if !ok {
-			return
-		}
-		if s.userNotExist(sn.UUID) {
-			s.reject(addr)
-			return
-		}
 		s.ack(addr, block)
 		if s.dup(addr.String(), block) {
 			return
 		}
-		go s.dispatch(s.findAddrByUUID(sn.UUID), pkt, block)
+		if binary.Read(b, binary.BigEndian, &fileId) != nil {
+			return
+		}
+		publisher, ok := s.findSignByFileId(fileId)
+		if !ok {
+			return
+		}
+		if a, ok := s.findAddrByUUID(publisher.UUID); ok {
+			s.dispatch(a, pkt, _NCK, block)
+		}
 	case OpSignedMSG:
 		msg := new(SignedMessage)
 		if msg.Unmarshal(pkt) != nil {
-			return
-		}
-		if s.userNotExist(msg.UUID) {
-			s.reject(addr)
 			return
 		}
 		s.ack(addr, msg.Block)
 		if s.dup(addr.String(), msg.Block) {
 			return
 		}
-		s.track(&msg.SignBody, msg.Block, pkt)
-		s.handle(&msg.SignBody, msg.Block, pkt)
+		s.cache(&msg.SignBody, msg.Block, pkt)
+		s.ackedRelay(&msg.SignBody, msg.Block, pkt)
 		log.Printf("received msg [%s] from [%s]", string(msg.Payload), addr.String())
 	case OpData:
 		var fileId uint32
@@ -181,18 +189,36 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		if s.isAudio(fileId) {
-			s.handleStreamData(fileId, pkt, addr)
+			s.relayAudioStream(fileId, pkt, addr)
 			return
 		}
 		if w, ok := s.isContent(fileId); ok {
 			s.relayToSubscribers(*w, pkt)
 			return
 		}
-		sign, ok := s.findSignByFileId(fileId)
-		if !ok {
+		if publisher, ok := s.findSignByFileId(fileId); ok {
+			s.directRelay(publisher, pkt)
+		}
+	case OpPull:
+		var pr PullReq
+		if pr.Unmarshal(pkt) != nil {
 			return
 		}
-		s.directRelay(sign, pkt)
+		s.ack(addr, pr.Block)
+		if s.dup(addr.String(), pr.Block) {
+			return
+		}
+		s.push(pr, addr)
+	case OpDiscovery:
+		var drq DiscoveryReq
+		if drq.Unmarshal(pkt) != nil {
+			return
+		}
+		s.ack(addr, drq.Block)
+		if s.dup(addr.String(), drq.Block) {
+			return
+		}
+		s.sendUsers(drq, addr)
 	default:
 		var (
 			rrq  ReadReq
@@ -201,7 +227,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		)
 		switch {
 		case wrq.Unmarshal(pkt) == nil:
-			if s.userNotExist(wrq.UUID) {
+			if _, ok := s.addrMap.Load(addr.String()); !ok {
 				s.reject(addr)
 				return
 			}
@@ -237,12 +263,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			}
 			switch wrq.Code {
 			case OpSendImage, OpSendGif, OpSendVoice, OpPublish, OpSyncIcon:
-				s.track(sign, wrq.Block, pkt)
+				s.cache(sign, wrq.Block, pkt)
 			default:
 			}
-			s.handle(sign, wrq.Block, pkt)
+			s.ackedRelay(sign, wrq.Block, pkt)
 		case rrq.Unmarshal(pkt) == nil:
-			if s.userNotExist(rrq.Subscriber) {
+			if _, ok := s.addrMap.Load(addr.String()); !ok {
 				s.reject(addr)
 				return
 			}
@@ -258,7 +284,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			default:
 			}
 		case ctrl.Unmarshal(pkt) == nil:
-			if s.userNotExist(ctrl.UUID) {
+			if _, ok := s.addrMap.Load(addr.String()); !ok {
 				s.reject(addr)
 				return
 			}
@@ -272,15 +298,124 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			}
 			switch ctrl.Code {
 			case OpSyncName:
-				s.track(sign, ctrl.Block, pkt)
-				s.handle(sign, ctrl.Block, pkt)
+				s.cache(sign, ctrl.Block, pkt)
+				s.ackedRelay(sign, ctrl.Block, pkt)
 			default:
 			}
 		}
 	}
 }
 
-func (s *Server) track(sign *SignBody, block uint32, pkt []byte) {
+func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
+	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
+	for _, d := range s.toDiscoveryResp(users, drq.Block) {
+		v, err := d.Marshal()
+		if err != nil {
+			log.Printf("discovery marshal failed: %v", err)
+		}
+		s.dispatch(addr.String(), v, _SERVER, d.Block)
+	}
+}
+
+func (s *Server) toDiscoveryResp(users []string, reqID uint32) []DiscoveryResp {
+	const maxSize = DatagramSize - 12
+	ret := make([]DiscoveryResp, 0, 20)
+	prev, size := 0, 0
+	for i := 0; i < len(users); i++ {
+		n := 1 + len(users[i])
+		if size+n > maxSize {
+			ret = append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 0, UUIDS: users[prev:i]})
+			prev = i
+			size = 0
+		}
+		size += n
+	}
+	ret = append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 1, UUIDS: users[prev:]})
+	return ret
+}
+
+func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
+	switch flag {
+	case Online:
+		return s.collectOnlineUsers(sign)
+	case Active:
+		fallthrough
+	default:
+		return s.collectActiveUsers(sign)
+	}
+}
+
+func (s *Server) collectOnlineUsers(sign string) []string {
+	uuids := make([]string, 0)
+	s.addrMap.Range(func(k, v interface{}) bool {
+		p := v.(Peer)
+		if p.Sign == sign {
+			uuids = append(uuids, p.UUID)
+		}
+		return true
+	})
+	return uuids
+}
+
+func (s *Server) collectActiveUsers(sign string) []string {
+	uuids := make([]string, 0)
+	hs := s.loadHistorySet(sign)
+	hs.Range(func(k, v interface{}) bool {
+		uuids = append(uuids, k.(string))
+		return true
+	})
+	return uuids
+}
+
+func (s *Server) push(pr PullReq, addr net.Addr) {
+	h := s.loadHistory(&pr.SignBody)
+	if pr.end == math.MaxUint32 {
+		s.pushRange(pr, addr, h, Range{pr.start, h.nextBlock()})
+		return
+	}
+	ranges := h.Select(pr.Range)
+	s.reply(pr, addr, ranges)
+	t := RangeTracker{ranges: pr.ranges, latestBlock: pr.end}
+	t.Exclude(ranges)
+	for _, r := range t.ranges {
+		s.pushRange(pr, addr, h, r)
+	}
+}
+
+func (s *Server) reply(pr PullReq, addr net.Addr, ranges []Range) {
+	var (
+		p        []byte
+		err      error
+		baseSize = 9 + len(pr.UUID) + len(pr.Sign)
+		maxLen   = (DatagramSize - baseSize) / 8
+		req      ReplyReq
+	)
+	for i := 0; i < len(ranges); i += maxLen {
+		if i+maxLen < len(ranges) {
+			req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: ranges[i : i+maxLen]}
+			p, err = req.Marshal()
+		} else {
+			req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: ranges[i:]}
+			p, err = req.Marshal()
+		}
+		if err != nil {
+			log.Printf("pull req [%s]: %v", pr.UUID, err)
+		}
+		s.dispatch(addr.String(), p, _SERVER, req.Block)
+	}
+}
+
+func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
+	for i := r.start; i <= r.end; i++ {
+		p, ok := h.Load(i)
+		if !ok {
+			continue
+		}
+		s.dispatch(addr.String(), p.([]byte), pr.UUID, i)
+	}
+}
+
+func (s *Server) cache(sign *SignBody, block uint32, pkt []byte) {
 	s.loadHistory(sign).add(block, pkt)
 }
 
@@ -326,10 +461,11 @@ func (s *Server) relayToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go func() {
-			_, addr := s.findTarget(k.(string))
-			_, _ = s.conn.WriteTo(pkt, addr)
-		}()
+		_, addr, ok := s.findTarget(k.(string))
+		if !ok {
+			return true
+		}
+		_, _ = s.conn.WriteTo(pkt, addr)
 		return true
 	})
 }
@@ -340,7 +476,11 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		go s.dispatch(s.findAddrByUUID(k.(string)), pkt, wrq.Block)
+		a, ok := s.findAddrByUUID(k.(string))
+		if !ok {
+			return true
+		}
+		go s.dispatch(a, pkt, wrq.UUID, wrq.Block)
 		return true
 	})
 }
@@ -353,7 +493,11 @@ func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 		s.pubMap.Store(pair, subs)
 	}
 	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
-	go s.dispatch(s.findAddrByUUID(rrq.Publisher), pkt, rrq.Block)
+	a, ok := s.findAddrByUUID(rrq.Publisher)
+	if !ok {
+		return
+	}
+	go s.dispatch(a, pkt, rrq.Subscriber, rrq.Block)
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
@@ -370,10 +514,13 @@ func (s *Server) reject(addr net.Addr) {
 	_, _ = s.conn.WriteTo(p, addr)
 }
 
-func (s *Server) findTarget(UUID string) (string, *net.UDPAddr) {
-	target := s.findAddrByUUID(UUID)
+func (s *Server) findTarget(UUID string) (string, *net.UDPAddr, bool) {
+	target, ok := s.findAddrByUUID(UUID)
+	if !ok {
+		return "", nil, false
+	}
 	addr, _ := net.ResolveUDPAddr("udp", target)
-	return target, addr
+	return target, addr, true
 }
 
 func (s *Server) removeByUUID(UUID string) {
@@ -392,7 +539,7 @@ func (s *Server) removeByAddr(addr string) {
 	}
 }
 
-func (s *Server) handleStreamData(fileId uint32, pkt []byte, sender net.Addr) {
+func (s *Server) relayAudioStream(fileId uint32, pkt []byte, sender net.Addr) {
 	p, ok := s.addrMap.Load(sender.String())
 	if !ok {
 		return
@@ -404,10 +551,11 @@ func (s *Server) handleStreamData(fileId uint32, pkt []byte, sender net.Addr) {
 	}
 	receivers.(*sync.Map).Range(func(key, value interface{}) bool {
 		if key != UUID {
-			go func() {
-				_, addr := s.findTarget(key.(string))
-				_, _ = s.conn.WriteTo(pkt, addr)
-			}()
+			_, addr, ok := s.findTarget(key.(string))
+			if !ok {
+				return true
+			}
+			_, _ = s.conn.WriteTo(pkt, addr)
 		}
 		return true
 	})
@@ -417,10 +565,8 @@ func (s *Server) directRelay(sign *SignBody, pkt []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
-			go func() {
-				addr, _ := net.ResolveUDPAddr("udp", key.(string))
-				_, _ = s.conn.WriteTo(pkt, addr)
-			}()
+			addr, _ := net.ResolveUDPAddr("udp", key.(string))
+			_, _ = s.conn.WriteTo(pkt, addr)
 		}
 		return true
 	})
@@ -450,12 +596,12 @@ func (s *Server) findSignByUUID(uuid string) (*SignBody, bool) {
 	return p.(Peer).SignBody, true
 }
 
-func (s *Server) findAddrByUUID(uuid string) string {
+func (s *Server) findAddrByUUID(uuid string) (string, bool) {
 	addr, ok := s.uuidMap.Load(uuid)
 	if ok {
-		return addr.(string)
+		return addr.(string), true
 	}
-	return ""
+	return "", false
 }
 
 func (s *Server) findSignByFileId(fileId uint32) (*SignBody, bool) {
@@ -487,7 +633,7 @@ func (s *Server) dup(addr string, block uint32) bool {
 	r := MonoRange(block)
 	dup := p.Contains(r)
 	if !dup {
-		p.Add(r)
+		p.Track(r)
 	}
 	return dup
 }
@@ -500,32 +646,32 @@ func (s *Server) check(addr string, block uint32) bool {
 	return v.(Peer).Contains(MonoRange(block))
 }
 
-func (s *Server) handle(sign *SignBody, block uint32, bytes []byte) {
+func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 	s.addrMap.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
-			go s.dispatch(key.(string), bytes, block)
+			go s.dispatch(key.(string), bytes, sign.UUID, block)
 		}
 		return true
 	})
 }
 
-func (s *Server) userNotExist(UUID string) bool {
-	_, ok := s.uuidMap.Load(UUID)
-	return !ok
+func (s *Server) cacheKey(UUID string, block uint32) string {
+	return UUID + "#" + strconv.FormatUint(uint64(block), 16)
 }
 
 // dispatch may block by slow connection
-func (s *Server) dispatch(addr string, bytes []byte, block uint32) {
+func (s *Server) dispatch(addr string, bytes []byte, sender string, block uint32) {
 	v, ok := s.addrMap.Load(addr)
 	if !ok {
 		return
 	}
+	cacheKey := s.cacheKey(sender, block)
 	ctx, cancel := context.WithCancel(context.Background())
 	p := v.(Peer)
-	p.Store(block, cancel)
-	defer p.Delete(block)
+	p.Store(cacheKey, cancel)
+	defer p.Delete(cacheKey)
 	defer cancel()
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)

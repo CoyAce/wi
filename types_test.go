@@ -115,7 +115,7 @@ func TestFileContentRangeMergeAndExclude(t *testing.T) {
 
 func TestRange(t *testing.T) {
 	rt := RangeTracker{}
-	rt.Add(Range{1, 20})
+	rt.Track(Range{1, 20})
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
 	}
@@ -123,46 +123,46 @@ func TestRange(t *testing.T) {
 
 func TestRangeRemove(t *testing.T) {
 	rt := RangeTracker{}
-	rt.Add(Range{1, 20})
-	rt.Add(Range{21, 21})
+	rt.Track(Range{1, 20})
+	rt.Track(Range{21, 21})
 	// miss 22
-	rt.Add(Range{23, 24})
+	rt.Track(Range{23, 24})
 	// miss 22, [25,49]
-	rt.Add(Range{50, 50})
+	rt.Track(Range{50, 50})
 	expected := []Range{{22, 22}, {25, 49}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(Range{20, 22})
+	rt.Track(Range{20, 22})
 	expected = []Range{{25, 49}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(Range{25, 25})
+	rt.Track(Range{25, 25})
 	expected = []Range{{26, 49}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(Range{45, 50})
-	rt.Add(Range{20, 20})
+	rt.Track(Range{45, 50})
+	rt.Track(Range{20, 20})
 	expected = []Range{{26, 44}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(Range{25, 30})
+	rt.Track(Range{25, 30})
 	expected = []Range{{31, 44}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
 	// miss [31,35],[40,44]
-	rt.Add(Range{36, 39})
+	rt.Track(Range{36, 39})
 	expected = []Range{{31, 35}, {40, 44}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(Range{38, 38})
-	rt.Add(Range{31, 35})
-	rt.Add(Range{40, 44})
+	rt.Track(Range{38, 38})
+	rt.Track(Range{31, 35})
+	rt.Track(Range{40, 44})
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
 	}
@@ -170,16 +170,16 @@ func TestRangeRemove(t *testing.T) {
 
 func TestRangeAdd(t *testing.T) {
 	rt := RangeTracker{}
-	rt.Add(Range{1, 20})
-	rt.Add(Range{1, 20})
-	rt.Add(Range{30, 40})
-	rt.Add(Range{40, 50})
-	rt.Add(Range{40, 45})
+	rt.Track(Range{1, 20})
+	rt.Track(Range{1, 20})
+	rt.Track(Range{30, 40})
+	rt.Track(Range{40, 50})
+	rt.Track(Range{40, 45})
 	expected := []Range{{21, 29}}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(rt.ranges[0])
+	rt.Track(rt.ranges[0])
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
 	}
@@ -187,7 +187,7 @@ func TestRangeAdd(t *testing.T) {
 
 func TestRangeContains(t *testing.T) {
 	rt := RangeTracker{}
-	rt.Add(Range{1, 20})
+	rt.Track(Range{1, 20})
 	if !rt.Contains(Range{1, 20}) || !rt.Contains(Range{1, 1}) || !rt.Contains(Range{20, 20}) {
 		t.Error("Expected RangeTracker to contain Range")
 	}
@@ -197,11 +197,11 @@ func TestRangeContains(t *testing.T) {
 	if rt.Contains(Range{1, 21}) {
 		t.Error("Expected RangeTracker to not contain Range{1,21}")
 	}
-	rt.Add(Range{23, 23})
+	rt.Track(Range{23, 23})
 	if rt.Contains(MonoRange(22)) {
 		t.Error("Expected RangeTracker to not contain MonoRange(22)")
 	}
-	rt.Add(MonoRange(21))
+	rt.Track(MonoRange(21))
 	if !rt.Contains(MonoRange(21)) {
 		t.Error("Expected RangeTracker to contain MonoRange(21)")
 	}
@@ -213,26 +213,49 @@ func TestRangeContains(t *testing.T) {
 	}
 }
 
+func TestRangeSelect(t *testing.T) {
+	tracker := new(RangeTracker)
+	tracker.Track(Range{1, 1})
+	tracker.Track(Range{3, 3})
+	tracker.Track(Range{10, 20})
+	// missing [2,2],[4,9]
+	r := tracker.Select(Range{2, 4})
+	expected := []Range{{2, 2}, {4, 4}}
+	if !reflect.DeepEqual(r, expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, r)
+	}
+	r = tracker.Select(Range{6, 6})
+	expected = []Range{{6, 6}}
+	if !reflect.DeepEqual(r, expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, r)
+	}
+	r = tracker.Select(Range{8, 10})
+	expected = []Range{{8, 9}}
+	if !reflect.DeepEqual(r, expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, r)
+	}
+}
+
 func TestMonoRange(t *testing.T) {
 	rt := RangeTracker{}
-	rt.Add(MonoRange(4))
-	rt.Add(MonoRange(2))
+	rt.Track(MonoRange(4))
+	rt.Track(MonoRange(2))
 	expected := []Range{MonoRange(1), MonoRange(3)}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(MonoRange(6))
+	rt.Track(MonoRange(6))
 	expected = []Range{MonoRange(1), MonoRange(3), MonoRange(5)}
-	if !reflect.DeepEqual(rt.GetRanges(), expected) {
-		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.GetRanges())
+	if !reflect.DeepEqual(rt.Get(), expected) {
+		t.Errorf("Expected RangeTracker %v, got %v", expected, rt.Get())
 	}
-	rt.Add(MonoRange(1))
-	rt.Add(MonoRange(3))
-	rt.Add(MonoRange(5))
+	rt.Track(MonoRange(1))
+	rt.Track(MonoRange(3))
+	rt.Track(MonoRange(5))
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
 	}
-	rt.Add(Range{1, 6})
+	rt.Track(Range{1, 6})
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
 	}

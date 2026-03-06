@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,7 +69,7 @@ func (f *fileWriter) tryWrite(data Data) {
 	fd.counter++
 	req := fd.req
 	fd.data = append(fd.data, data)
-	fd.Add(MonoRange(data.Block))
+	fd.Track(MonoRange(data.Block))
 	if f.received256kb(fd) {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		if fd.elapsed1Second() {
@@ -151,7 +152,7 @@ func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
 		return rt
 	}
 	finalBlock := (size + BlockSize - 1) / BlockSize
-	rt.Add(MonoRange(uint32(finalBlock + 1)))
+	rt.Track(MonoRange(uint32(finalBlock + 1)))
 	return rt
 }
 
@@ -256,7 +257,7 @@ func (f *fileContent) add(ranges []Range) {
 func (f *fileContent) remove(rg Range) {
 	f.lock.Lock()
 	defer f.lock.Unlock()
-	f.reading.Add(rg)
+	f.reading.Track(rg)
 }
 
 func (f *fileContent) swap() {
@@ -391,6 +392,7 @@ type messages struct {
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
 	trackers       sync.Map           // uuid -> *RangeTracker
+	discoveries    sync.Map           // reqID -> chan DiscoveryResp
 }
 
 func (c *Client) nextID() uint32 {
@@ -593,7 +595,7 @@ func (c *Client) send(req Req) error {
 	if err != nil {
 		return err
 	}
-	err = c.write(pkt, req.ID())
+	err = c.write(pkt, req.ID(), true)
 	if err != nil {
 		return err
 	}
@@ -663,7 +665,7 @@ func (c *Client) SendText(text string) error {
 		return err
 	}
 
-	return c.write(pkt, msg.SignReq.Block)
+	return c.write(pkt, msg.SignReq.Block, true)
 }
 
 func (c *Client) SyncName(oldUUID string) {
@@ -672,7 +674,7 @@ func (c *Client) SyncName(oldUUID string) {
 	if err != nil {
 		panic(err)
 	}
-	err = c.write(pkt, nameReq.Block)
+	err = c.write(pkt, nameReq.Block, true)
 	if err != nil {
 		log.Printf("sync name: %v", err)
 	}
@@ -684,11 +686,88 @@ func (c *Client) ReadIcon(target string) error {
 }
 
 func (c *Client) Track(sign *SignBody, block uint32) {
-	c.loadRangeTracker(sign).add(MonoRange(block))
+	c.loadRangeTracker(sign).Track(MonoRange(block))
+}
+
+func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
+	reqID := c.nextID()
+	resp := make(chan DiscoveryResp, 150)
+	c.discoveries.Store(reqID, resp)
+	defer c.discoveries.Delete(reqID)
+	err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag})
+	if err != nil {
+		log.Printf("discovery failed: %v", err)
+	}
+	ret := make([]string, 0)
+LOOP:
+	for {
+		timer := time.After(10 * time.Second)
+		select {
+		case d := <-resp:
+			ret = append(ret, d.UUIDS...)
+			if d.Final == 1 {
+				break LOOP
+			}
+		case <-timer:
+			return nil, errors.New("discovery timed out")
+		}
+	}
+	return ret, nil
 }
 
 func (c *Client) pull() {
+	if !c.discoveryActiveUsers() {
+		return
+	}
+	hs := c.loadHistorySet(c.Sign)
+	hs.Range(func(uuid, value interface{}) bool {
+		if uuid == c.ID() {
+			return true
+		}
+		var (
+			tracker  = value.(*RangeTracker)
+			start    = uint32(0)
+			ranges   = tracker.Get()
+			baseSize = 17 + len(uuid.(string)) + len(c.Sign)
+			maxLen   = (DatagramSize - baseSize) / 8
+			pr       *PullReq
+			signBody = SignBody{Sign: c.Sign, UUID: uuid.(string)}
+		)
+		for i := 0; i < len(ranges); i += maxLen {
+			if i+maxLen < len(ranges) {
+				if i > 0 {
+					start = ranges[i].start
+				}
+				rg := Range{start: start, end: ranges[i+maxLen-1].end}
+				pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: ranges[i : i+maxLen]}
+			} else {
+				rg := Range{start: ranges[i].start, end: tracker.latestBlock}
+				pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: ranges[i:]}
+			}
+			err := c.send(pr)
+			if err != nil {
+				log.Printf("pull failed: %v", err)
+			}
+		}
+		pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}
+		err := c.send(pr)
+		if err != nil {
+			log.Printf("pull failed: %v", err)
+		}
+		return true
+	})
+}
 
+func (c *Client) discoveryActiveUsers() bool {
+	uuidSet, err := c.Discover(Active)
+	if err != nil {
+		log.Printf("discovery active users failed: %v", err)
+		return false
+	}
+	for _, uuid := range uuidSet {
+		c.Track(&SignBody{Sign: c.Sign, UUID: uuid}, 0)
+	}
+	return true
 }
 
 func (c *Client) loadHistorySet(sign string) *sync.Map {
@@ -730,9 +809,9 @@ func (c *Client) ListenAndServe(addr string) {
 			close(c.Status)
 		}
 		for {
+			go c.pull()
 			time.Sleep(30 * time.Second)
 			c.SendSign()
-			c.pull()
 		}
 	}()
 
@@ -765,7 +844,7 @@ func (c *Client) SignIn() {
 	if err != nil {
 		panic(err)
 	}
-	err = c.write(pkt, sign.Block)
+	err = c.write(pkt, sign.Block, false)
 	if err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
 	} else {
@@ -811,31 +890,32 @@ func (c *Client) serve() {
 
 func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
-		ack   Ack
-		nck   Nck
-		msg   SignedMessage
-		data  Data
-		ec    ErrCode
-		rrq   ReadReq
-		wrq   WriteReq
-		check Check
-		ctrl  CtrlReq
+		ack       Ack
+		nck       Nck
+		msg       SignedMessage
+		data      Data
+		ec        ErrCode
+		rrq       ReadReq
+		wrq       WriteReq
+		check     Check
+		ctrl      CtrlReq
+		reply     ReplyReq
+		discovery DiscoveryResp
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
 		log.Printf("ack received: %v", ack.Block)
 		cancel, ok := c.ackHandlers.Load(ack.Block)
 		if !ok {
-			log.Printf("unknown ack: %v", ack.Block)
 			return
 		}
 		cancel.(context.CancelFunc)()
 	case check.Unmarshal(buf) == nil:
 		if c.check(check.UUID, check.Block) {
-			c.ack(addr, msg.Block)
+			c.ack(addr, check.UUID, msg.Block)
 		}
 	case msg.Unmarshal(buf) == nil:
-		c.ack(addr, msg.Block)
+		c.ack(addr, msg.UUID, msg.Block)
 		if c.dup(msg.UUID, msg.Block) {
 			return
 		}
@@ -843,13 +923,13 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		log.Printf("Receiving text [%s] from [%s]\n", s, msg.UUID)
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
-		c.ack(addr, rrq.Block)
+		c.ack(addr, rrq.Subscriber, rrq.Block)
 		if c.dup(rrq.Subscriber, rrq.Block) {
 			return
 		}
 		c.SubMessages <- rrq
 	case wrq.Unmarshal(buf) == nil:
-		c.ack(addr, wrq.Block)
+		c.ack(addr, wrq.UUID, wrq.Block)
 		if c.dup(wrq.UUID, wrq.Block) {
 			return
 		}
@@ -896,7 +976,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.fileData <- data
 		}
 	case nck.Unmarshal(buf) == nil:
-		c.ack(addr, nck.Block)
+		c.ack(addr, _NCK, nck.Block)
 		log.Printf("nck received")
 		c.req <- nck
 	case ec.Unmarshal(buf) == nil:
@@ -904,8 +984,22 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.SignIn()
 		}
 	case ctrl.Unmarshal(buf) == nil:
-		c.ack(addr, ctrl.Block)
+		c.ack(addr, ctrl.UUID, ctrl.Block)
 		c.CtrlMessages <- ctrl
+	case reply.Unmarshal(buf) == nil:
+		c.ack(addr, _SERVER, reply.Block)
+		tracker := c.loadRangeTracker(&reply.SignBody)
+		tracker.Exclude(reply.ranges)
+	case discovery.Unmarshal(buf) == nil:
+		c.ack(addr, _SERVER, discovery.Block)
+		dc, ok := c.discoveries.Load(discovery.ReqID)
+		if !ok {
+			return
+		}
+		if c.dup(_SERVER, discovery.Block) {
+			return
+		}
+		dc.(chan DiscoveryResp) <- discovery
 	}
 }
 
@@ -914,7 +1008,10 @@ func (c *Client) dup(UUID string, block uint32) bool {
 	r := MonoRange(block)
 	dup := t.Contains(r)
 	if !dup {
-		t.Add(r)
+		t.Track(r)
+		if UUID != _SERVER {
+			c.Track(&SignBody{Sign: c.Sign, UUID: UUID}, block)
+		}
 	}
 	return dup
 }
@@ -932,8 +1029,8 @@ func (c *Client) check(UUID string, block uint32) bool {
 	return t.Contains(MonoRange(block))
 }
 
-func (c *Client) ack(addr net.Addr, block uint32) {
-	ack := Ack{Block: block}
+func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
+	ack := Ack{Block: block, UUID: UUID}
 	pkt, err := ack.Marshal()
 	_, err = c.conn.WriteTo(pkt, addr)
 	if err != nil {
@@ -942,7 +1039,7 @@ func (c *Client) ack(addr net.Addr, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.GetRanges()}
+	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.Get()}
 	err := c.send(&nck)
 	if err != nil {
 		log.Printf("send nck failed: %v", err)
@@ -963,11 +1060,13 @@ func (c *Client) SetServerAddr(addr string) {
 	c.SAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) write(bytes []byte, block uint32) error {
+func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	retry, trigger := context.WithCancel(context.Background())
 	c.ackHandlers.Store(block, cancel)
-	c.retryHandlers.Store(block, trigger)
+	if retryable {
+		c.retryHandlers.Store(block, trigger)
+	}
 	defer c.ackHandlers.Delete(block)
 	defer cancel()
 	defer c.retryHandlers.Delete(block)
@@ -1007,3 +1106,8 @@ func (c *Client) write(bytes []byte, block uint32) error {
 }
 
 var DefaultClient *Client
+
+const (
+	_NCK    = "NCK"
+	_SERVER = ""
+)

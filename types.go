@@ -39,6 +39,10 @@ const (
 	OpReady
 	OpCheck
 	OpReadIcon
+	OpPull
+	OpReply
+	OpDiscovery
+	OpDiscoveryResp
 )
 
 var wrqSet = map[OpCode]bool{
@@ -610,10 +614,11 @@ func (c *Check) Unmarshal(p []byte) error {
 
 type Ack struct {
 	Block uint32
+	UUID  string
 }
 
 func (a *Ack) Marshal() ([]byte, error) {
-	const size = 2 + 4 // operation code  + block number
+	size := 2 + 4 + len(a.UUID) + 1 // operation code  + block number
 
 	b := new(bytes.Buffer)
 	b.Grow(size)
@@ -628,12 +633,17 @@ func (a *Ack) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
+	err = writeString(b, a.UUID) // write uuid
+	if err != nil {
+		return nil, err
+	}
+
 	return b.Bytes(), nil
 }
 
 func (a *Ack) Unmarshal(p []byte) error {
 	var code OpCode
-	r := bytes.NewReader(p)
+	r := bytes.NewBuffer(p)
 
 	err := binary.Read(r, binary.BigEndian, &code) // read operation code
 	if err != nil {
@@ -644,7 +654,17 @@ func (a *Ack) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	return binary.Read(r, binary.BigEndian, &a.Block) // read block number
+	err = binary.Read(r, binary.BigEndian, &a.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	a.UUID, err = readString(r) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
 }
 
 type ErrCode uint16
@@ -732,7 +752,7 @@ func (n *Nck) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = binary.Write(b, binary.BigEndian, byte(len(n.ranges))) // write ranges count
+	err = b.WriteByte(byte(len(n.ranges))) // write ranges count
 	if err != nil {
 		return nil, err
 	}
@@ -771,7 +791,7 @@ func (n *Nck) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	err = binary.Read(r, binary.BigEndian, &l) // read ranges count
+	l, err = r.ReadByte() // read ranges count
 	if err != nil {
 		return InvalidData
 	}
@@ -783,6 +803,389 @@ func (n *Nck) Unmarshal(p []byte) error {
 			return InvalidData
 		}
 		n.ranges = append(n.ranges, rg)
+	}
+	return nil
+}
+
+type PullReq struct {
+	Block uint32
+	SignBody
+	Range          // pull range
+	ranges []Range // missing packets
+}
+
+func (pr *PullReq) ID() uint32 {
+	return pr.Block
+}
+
+func (pr *PullReq) Marshal() ([]byte, error) {
+	baseSize := 2 + 4 + len(pr.Sign) + 1 + len(pr.UUID) + 1 + 8 + 1
+	size := baseSize + len(pr.ranges)*8
+	b := new(bytes.Buffer)
+	b.Grow(size)
+	if size > DatagramSize {
+		return nil, InvalidData
+	}
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpPull)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, pr.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, pr.Sign) // write sign
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, pr.UUID) // write uuid
+	if err != nil {
+		return nil, err
+	}
+
+	b.Write(pr.Range.Marshal()) // write pull range
+
+	err = binary.Write(b, binary.BigEndian, byte(len(pr.ranges))) // write ranges count
+	if err != nil {
+		return nil, err
+	}
+
+	for _, r := range pr.ranges { // write ranges
+		b.Write(r.Marshal())
+	}
+
+	return b.Bytes(), nil
+}
+
+func (pr *PullReq) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		l    byte
+		r    = bytes.NewBuffer(p)
+		rg   = Range{}
+	)
+
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpPull {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &pr.Block) // read block id
+	if err != nil {
+		return InvalidData
+	}
+
+	pr.Sign, err = readString(r) //  read sign
+	if err != nil {
+		return InvalidData
+	}
+
+	pr.UUID, err = readString(r) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	err = pr.Range.Unmarshal(r)
+	if err != nil {
+		return InvalidData
+	}
+
+	l, err = r.ReadByte() // read ranges count
+	if err != nil {
+		return InvalidData
+	}
+
+	pr.ranges = make([]Range, 0, l)
+	for i := 0; i < int(l); i++ {
+		err = rg.Unmarshal(r)
+		if err != nil {
+			return InvalidData
+		}
+		pr.ranges = append(pr.ranges, rg)
+	}
+	return nil
+}
+
+type ReplyReq struct {
+	Block uint32
+	SignBody
+	ranges []Range
+}
+
+func (r *ReplyReq) Marshal() ([]byte, error) {
+	baseSize := 2 + 4 + len(r.Sign) + 1 + len(r.UUID) + 1 + 1
+	size := baseSize + len(r.ranges)*8
+	b := new(bytes.Buffer)
+	b.Grow(size)
+	if size > DatagramSize {
+		return nil, errors.New("too many ranges")
+	}
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpReply)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, r.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, r.Sign) // write sign
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, r.UUID) // write uuid
+	if err != nil {
+		return nil, err
+	}
+
+	err = b.WriteByte(byte(len(r.ranges))) // write ranges count
+	if err != nil {
+		return nil, err
+	}
+
+	for _, r := range r.ranges { // write ranges
+		b.Write(r.Marshal())
+	}
+
+	return b.Bytes(), nil
+}
+
+func (r *ReplyReq) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		l    byte
+		b    = bytes.NewBuffer(p)
+		rg   = Range{}
+	)
+
+	err := binary.Read(b, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpReply {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &r.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	r.Sign, err = readString(b) //  read sign
+	if err != nil {
+		return InvalidData
+	}
+
+	r.UUID, err = readString(b) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	l, err = b.ReadByte() // read ranges count
+	if err != nil {
+		return InvalidData
+	}
+
+	r.ranges = make([]Range, 0, l)
+	for i := 0; i < int(l); i++ {
+		err = rg.Unmarshal(b)
+		if err != nil {
+			return InvalidData
+		}
+		r.ranges = append(r.ranges, rg)
+	}
+	return nil
+}
+
+type DiscoveryFlag byte
+
+const (
+	Active DiscoveryFlag = iota
+	Online
+)
+
+type DiscoveryReq struct {
+	Block uint32
+	Sign  string
+	DiscoveryFlag
+}
+
+func (d *DiscoveryReq) ID() uint32 {
+	return d.Block
+}
+
+func (d *DiscoveryReq) Marshal() ([]byte, error) {
+	size := 2 + 4 + len(d.Sign) + 1
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpDiscovery)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, d.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, d.Sign) // write sign
+	if err != nil {
+		return nil, err
+	}
+
+	err = b.WriteByte(byte(d.DiscoveryFlag)) // write flag
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (d *DiscoveryReq) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		r    = bytes.NewBuffer(p)
+	)
+
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpDiscovery {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &d.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	d.Sign, err = readString(r)
+	if err != nil {
+		return InvalidData
+	}
+
+	f, err := r.ReadByte()
+	if err != nil {
+		return InvalidData
+	}
+	d.DiscoveryFlag = DiscoveryFlag(f)
+
+	return nil
+}
+
+type DiscoveryResp struct {
+	Block uint32
+	ReqID uint32
+	Final byte
+	UUIDS []string
+}
+
+func (d *DiscoveryResp) ID() uint32 {
+	return d.Block
+}
+
+func (d *DiscoveryResp) Marshal() ([]byte, error) {
+	size := 2 + 4 + 4 + 1 + 1
+	for _, u := range d.UUIDS {
+		size += 1 + len(u)
+	}
+	if size > DatagramSize {
+		return nil, errors.New("too many UUIDs")
+	}
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpDiscoveryResp)) //  write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, d.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, d.ReqID) // write req id
+	if err != nil {
+		return nil, err
+	}
+
+	err = b.WriteByte(d.Final) // write final mark
+	if err != nil {
+		return nil, err
+	}
+
+	err = b.WriteByte(byte(len(d.UUIDS)))
+
+	for _, u := range d.UUIDS {
+		err = writeString(b, u)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return b.Bytes(), nil
+}
+
+func (d *DiscoveryResp) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		r    = bytes.NewBuffer(p)
+		l    byte
+		s    string
+	)
+
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpDiscoveryResp {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &d.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &d.ReqID) // read req id
+	if err != nil {
+		return InvalidData
+	}
+
+	d.Final, err = r.ReadByte() // read final flag
+	if err != nil {
+		return InvalidData
+	}
+
+	l, err = r.ReadByte() // read uuid cnt
+	if err != nil {
+		return InvalidData
+	}
+
+	d.UUIDS = make([]string, 0, l)
+	for i := byte(0); i < l; i++ {
+		s, err = readString(r)
+		if err != nil {
+			return InvalidData
+		}
+		d.UUIDS = append(d.UUIDS, s)
 	}
 	return nil
 }
@@ -822,6 +1225,17 @@ func (r *Range) contains(v Range) bool {
 
 func (r *Range) overlaps(v Range) bool {
 	return !(r.before(v) || r.after(v))
+}
+
+func (r *Range) intersects(v Range) (*Range, bool) {
+	start := max(r.start, v.start)
+	end := min(r.end, v.end)
+
+	if start > end {
+		return nil, false
+	}
+
+	return &Range{start: start, end: end}, true
 }
 
 func (r *Range) before(v Range) bool {

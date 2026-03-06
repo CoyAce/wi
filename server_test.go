@@ -3,12 +3,14 @@ package wi
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -299,8 +301,11 @@ func TestServerDupMessage(t *testing.T) {
 	sign := SignReq{1, SignBody{"default", "sender"}}
 	msg := SignedMessage{SignReq: sign, Payload: []byte("hello")}
 	msgPkt, _ := msg.Marshal()
-	addr := s.findAddrByUUID(receiver.ID())
-	s.dispatch(addr, msgPkt, sign.Block)
+	addr, ok := s.findAddrByUUID(receiver.ID())
+	if !ok {
+		t.Errorf("find receiver failed")
+	}
+	s.dispatch(addr, msgPkt, sign.UUID, sign.Block)
 	select {
 	case received := <-receiver.SignedMessages:
 		if !reflect.DeepEqual(received, msg) {
@@ -309,7 +314,43 @@ func TestServerDupMessage(t *testing.T) {
 	default:
 		t.Errorf("no message received")
 	}
-	s.dispatch(addr, msgPkt, sign.Block)
+	s.dispatch(addr, msgPkt, sign.UUID, sign.Block)
+	select {
+	case received := <-receiver.SignedMessages:
+		t.Errorf("duplicated message %v", received)
+	default:
+	}
+}
+
+func TestDupMessage(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	_ = receiver.SendText("sync")
+	sender1 := newClient(serverAddr, "sender1")
+	sender2 := newClient(serverAddr, "sender2")
+	go func() {
+		_ = sender1.SendText("hello")
+	}()
+	time.Sleep(1 * time.Millisecond)
+	go func() {
+		_ = sender2.SendText("world")
+	}()
+	select {
+	case received := <-receiver.SignedMessages:
+		if string(received.Payload) != "hello" {
+			t.Errorf("expected message %v; actual message %v", "hello", string(received.Payload))
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	select {
+	case received := <-receiver.SignedMessages:
+		if string(received.Payload) != "world" {
+			t.Errorf("expected message %v; actual message %v", "world", string(received.Payload))
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
 	select {
 	case received := <-receiver.SignedMessages:
 		t.Errorf("duplicated message %v", received)
@@ -355,16 +396,16 @@ func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
 	time.Sleep(1 * time.Millisecond)
-	if server.findAddrByUUID("sender") == "" {
+	if _, ok := server.findAddrByUUID("sender"); !ok {
 		t.Errorf("sender not found by UUID")
 	}
 	sender.SignOut()
 	time.Sleep(1 * time.Millisecond)
-	if server.findAddrByUUID("sender") != "" {
+	if _, ok := server.findAddrByUUID("sender"); ok {
 		t.Errorf("sign out failed")
 	}
 	_ = sender.SendText("hello")
-	if server.findAddrByUUID("sender") == "" {
+	if _, ok := server.findAddrByUUID("sender"); !ok {
 		t.Errorf("should retry sign")
 	}
 }
@@ -430,6 +471,124 @@ func TestReadIcon(t *testing.T) {
 		}
 	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
+	}
+}
+
+func TestPull(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	sender := newClient(serverAddr, "sender")
+	sender.SignIn()
+	_ = sender.SendText("hello")
+	_ = sender.SendText("world")
+	_ = sender.PublishFile("test.txt", 5, 1)
+	receiver := newClient(serverAddr, "receiver")
+	time.Sleep(1 * time.Millisecond)
+	receiver.SignIn()
+	receiver.pull()
+	select {
+	case msg := <-receiver.SignedMessages:
+		if string(msg.Payload) != "hello" {
+			t.Errorf("expected \"hello\"; actual %q", string(msg.Payload))
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	select {
+	case msg := <-receiver.SignedMessages:
+		if string(msg.Payload) != "world" {
+			t.Errorf("expected \"world\"; actual %q", string(msg.Payload))
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	select {
+	case wrq := <-receiver.FileMessages:
+		if wrq.Filename != "test.txt" {
+			t.Errorf("expected filename \"test.txt\"; actual filename %q", wrq.Filename)
+		}
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+	receiver.pull()
+	select {
+	case _ = <-receiver.SignedMessages:
+		t.Errorf("duplicated message")
+	default:
+	}
+	tracker := receiver.loadRangeTracker(&SignBody{Sign: receiver.Sign, UUID: sender.ID()})
+	if !tracker.isCompleted() {
+		t.Errorf("tracker not completed")
+	}
+}
+
+func TestDiscovery(t *testing.T) {
+	s, serverAddr := setUpServer(t)
+	wg := sync.WaitGroup{}
+	for i := 0; i < 200; i++ {
+		u := fmt.Sprintf("user_prefix_abcdefghij#000%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := newClient(serverAddr, u)
+			c.SignIn()
+		}()
+	}
+	wg.Wait()
+	ret := s.collectUsers("default", Online)
+	if len(ret) != 200 {
+		t.Errorf("expected 200 users; actual %d", len(ret))
+	}
+	ret = s.collectUsers("default", Active)
+	if len(ret) != 0 {
+		t.Errorf("expected 0 users; actual %d", len(ret))
+	}
+	c := newClient(serverAddr, "c")
+	ret, err := c.Discover(Online)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ret) != 201 {
+		t.Errorf("expected 201 users; actual %d", len(ret))
+	}
+	users := s.collectUsers("default", Online)
+	sort.Strings(users)
+	sort.Strings(ret)
+	if !reflect.DeepEqual(users, ret) {
+		t.Errorf("expected %v; actual %v", len(users), len(ret))
+	}
+	ret, err = c.Discover(Active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ret) != 0 {
+		t.Errorf("expected 0 users; actual %d", len(ret))
+	}
+	_ = c.SendText("hello")
+	ret, err = c.Discover(Active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ret) != 1 {
+		t.Errorf("expected  users; actual %d", len(ret))
+	}
+}
+
+func TestReply(t *testing.T) {
+	s, serverAddr := setUpServer(t)
+	c := newClient(serverAddr, "c")
+	sign := &SignBody{Sign: "default", UUID: "sender"}
+	c.Track(sign, 2)
+	c.SignIn()
+	tracker := c.loadRangeTracker(sign)
+	expected := []Range{{1, 1}}
+	if !reflect.DeepEqual(tracker.ranges, expected) {
+		t.Errorf("expected %v; actual %v", expected, tracker.ranges)
+	}
+	_, a, _ := s.findTarget("c")
+	r := Range{1, 1}
+	s.reply(PullReq{Block: c.nextID(), SignBody: *sign, Range: r, ranges: tracker.ranges}, a, tracker.ranges)
+	if len(tracker.ranges) != 0 {
+		t.Errorf("expected 0; actual %d", len(tracker.ranges))
 	}
 }
 

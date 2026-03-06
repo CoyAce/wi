@@ -195,9 +195,9 @@ func (r *RangeTracker) Set(ranges []Range) {
 }
 
 func (r *RangeTracker) Merge(x *RangeTracker) {
-	x.Exclude(r.GetRanges())
+	x.Exclude(r.Get())
 
-	for _, rng := range x.GetRanges() {
+	for _, rng := range x.Get() {
 		r.add(rng)
 	}
 }
@@ -208,7 +208,7 @@ func (r *RangeTracker) Exclude(ranges []Range) {
 	}
 }
 
-func (r *RangeTracker) Add(rg Range) {
+func (r *RangeTracker) Track(rg Range) {
 	if rg.start < r.nextBlock() {
 		// 考虑补帧
 		r.remove(rg)
@@ -242,11 +242,23 @@ func (r *RangeTracker) Contains(rg Range) bool {
 	return true
 }
 
-func (r *RangeTracker) GetRanges() []Range {
+func (r *RangeTracker) Get() []Range {
 	r.rwLock.RLock()
 	defer r.rwLock.RUnlock()
 	ret := make([]Range, len(r.ranges))
 	copy(ret, r.ranges)
+	return ret
+}
+
+func (r *RangeTracker) Select(x Range) []Range {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
+	ret := make([]Range, 0, len(r.ranges))
+	for _, rng := range r.ranges {
+		if v, ok := rng.intersects(x); ok {
+			ret = append(ret, *v)
+		}
+	}
 	return ret
 }
 
