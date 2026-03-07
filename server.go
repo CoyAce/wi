@@ -679,6 +679,9 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 	defer cancel()
 
 	for i := uint8(0); i < s.Retries; i++ {
+		if _, ok = s.addrMap.Load(target); !ok {
+			return
+		}
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			start = time.Now()
