@@ -301,9 +301,9 @@ func TestServerDupMessage(t *testing.T) {
 	sign := SignReq{1, SignBody{"default", "sender"}}
 	msg := SignedMessage{SignReq: sign, Payload: []byte("hello")}
 	msgPkt, _ := msg.Marshal()
-	addr, ok := s.findAddrByUUID(receiver.ID())
-	if !ok {
-		t.Errorf("find receiver failed")
+	addr, err := s.parseAddrByUUID(receiver.ID())
+	if err != nil {
+		t.Fatal(err)
 	}
 	s.dispatch(addr, msgPkt, sign.UUID, sign.Block)
 	select {
@@ -396,16 +396,19 @@ func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
 	time.Sleep(1 * time.Millisecond)
-	if _, ok := server.findAddrByUUID("sender"); !ok {
-		t.Errorf("sender not found by UUID")
+	_, err := server.parseAddrByUUID(sender.ID())
+	if err != nil {
+		t.Fatal(err)
 	}
 	sender.SignOut()
 	time.Sleep(1 * time.Millisecond)
-	if _, ok := server.findAddrByUUID("sender"); ok {
+	_, err = server.parseAddrByUUID(sender.ID())
+	if err == nil {
 		t.Errorf("sign out failed")
 	}
 	_ = sender.SendText("hello")
-	if _, ok := server.findAddrByUUID("sender"); !ok {
+	_, err = server.parseAddrByUUID(sender.ID())
+	if err != nil {
 		t.Errorf("should retry sign")
 	}
 }
@@ -584,7 +587,7 @@ func TestReply(t *testing.T) {
 	if !reflect.DeepEqual(tracker.ranges, expected) {
 		t.Errorf("expected %v; actual %v", expected, tracker.ranges)
 	}
-	_, a, _ := s.findTarget("c")
+	a, _ := s.parseAddrByUUID("c")
 	r := Range{1, 1}
 	s.reply(PullReq{Block: c.nextID(), SignBody: *sign, Range: r, ranges: tracker.ranges}, a, tracker.ranges)
 	if len(tracker.ranges) != 0 {

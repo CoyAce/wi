@@ -168,8 +168,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if !ok {
 			return
 		}
-		if a, ok := s.findAddrByUUID(publisher.UUID); ok {
-			s.dispatch(a, pkt, _NCK, block)
+		if target, err := s.parseAddrByUUID(publisher.UUID); err == nil {
+			s.dispatch(target, pkt, _NCK, block)
 		}
 	case OpSignedMSG:
 		msg := new(SignedMessage)
@@ -313,7 +313,7 @@ func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 		if err != nil {
 			log.Printf("discovery marshal failed: %v", err)
 		}
-		s.dispatch(addr.String(), v, _SERVER, d.Block)
+		s.dispatch(addr, v, _SERVER, d.Block)
 	}
 }
 
@@ -401,7 +401,7 @@ func (s *Server) reply(pr PullReq, addr net.Addr, ranges []Range) {
 		if err != nil {
 			log.Printf("pull req [%s]: %v", pr.UUID, err)
 		}
-		s.dispatch(addr.String(), p, _SERVER, req.Block)
+		s.dispatch(addr, p, _SERVER, req.Block)
 	}
 }
 
@@ -411,7 +411,7 @@ func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
 		if !ok {
 			continue
 		}
-		s.dispatch(addr.String(), p.([]byte), pr.UUID, i)
+		s.dispatch(addr, p.([]byte), pr.UUID, i)
 	}
 }
 
@@ -461,8 +461,8 @@ func (s *Server) relayToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		_, addr, ok := s.findTarget(k.(string))
-		if !ok {
+		addr, err := s.parseAddrByUUID(k.(string))
+		if err != nil {
 			return true
 		}
 		_, _ = s.conn.WriteTo(pkt, addr)
@@ -476,11 +476,11 @@ func (s *Server) dispatchToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		a, ok := s.findAddrByUUID(k.(string))
-		if !ok {
+		addr, err := s.parseAddrByUUID(k.(string))
+		if err != nil {
 			return true
 		}
-		go s.dispatch(a, pkt, wrq.UUID, wrq.Block)
+		go s.dispatch(addr, pkt, wrq.UUID, wrq.Block)
 		return true
 	})
 }
@@ -493,11 +493,11 @@ func (s *Server) dispatchToPublisher(pkt []byte, rrq ReadReq) {
 		s.pubMap.Store(pair, subs)
 	}
 	subs.(*sync.Map).Store(rrq.Subscriber, rrq)
-	a, ok := s.findAddrByUUID(rrq.Publisher)
-	if !ok {
+	addr, err := s.parseAddrByUUID(rrq.Publisher)
+	if err != nil {
 		return
 	}
-	go s.dispatch(a, pkt, rrq.Subscriber, rrq.Block)
+	go s.dispatch(addr, pkt, rrq.Subscriber, rrq.Block)
 }
 
 func (s *Server) deleteSub(rrq ReadReq) {
@@ -512,15 +512,6 @@ func (s *Server) reject(addr net.Addr) {
 	err := ErrUnknownUser
 	p, _ := err.Marshal()
 	_, _ = s.conn.WriteTo(p, addr)
-}
-
-func (s *Server) findTarget(UUID string) (string, *net.UDPAddr, bool) {
-	target, ok := s.findAddrByUUID(UUID)
-	if !ok {
-		return "", nil, false
-	}
-	addr, _ := net.ResolveUDPAddr("udp", target)
-	return target, addr, true
 }
 
 func (s *Server) removeByUUID(UUID string) {
@@ -551,8 +542,8 @@ func (s *Server) relayAudioStream(fileId uint32, pkt []byte, sender net.Addr) {
 	}
 	receivers.(*sync.Map).Range(func(key, value interface{}) bool {
 		if key != UUID {
-			_, addr, ok := s.findTarget(key.(string))
-			if !ok {
+			addr, err := s.parseAddrByUUID(key.(string))
+			if err != nil {
 				return true
 			}
 			_, _ = s.conn.WriteTo(pkt, addr)
@@ -596,12 +587,12 @@ func (s *Server) findSignByUUID(uuid string) (*SignBody, bool) {
 	return p.(Peer).SignBody, true
 }
 
-func (s *Server) findAddrByUUID(uuid string) (string, bool) {
-	addr, ok := s.uuidMap.Load(uuid)
-	if ok {
-		return addr.(string), true
+func (s *Server) parseAddrByUUID(uuid string) (net.Addr, error) {
+	a, ok := s.uuidMap.Load(uuid)
+	if !ok {
+		return nil, errors.New("no such uuid")
 	}
-	return "", false
+	return net.ResolveUDPAddr("udp", a.(string))
 }
 
 func (s *Server) findSignByFileId(fileId uint32) (*SignBody, bool) {
@@ -651,7 +642,11 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
 			// use goroutine to avoid blocking by slow connection
-			go s.dispatch(key.(string), bytes, sign.UUID, block)
+			addr, err := net.ResolveUDPAddr("udp", key.(string))
+			if err != nil {
+				return true
+			}
+			go s.dispatch(addr, bytes, sign.UUID, block)
 		}
 		return true
 	})
@@ -662,43 +657,50 @@ func (s *Server) cacheKey(UUID string, block uint32) string {
 }
 
 // dispatch may block by slow connection
-func (s *Server) dispatch(addr string, bytes []byte, sender string, block uint32) {
-	v, ok := s.addrMap.Load(addr)
-	if !ok {
+func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint32) {
+	var (
+		target = addr.String()
+		v      any
+		ok     bool
+	)
+	if v, ok = s.addrMap.Load(target); !ok {
 		return
 	}
-	cacheKey := s.cacheKey(sender, block)
-	ctx, cancel := context.WithCancel(context.Background())
-	p := v.(Peer)
+	var (
+		p           = v.(Peer)
+		start       time.Time
+		code        = OpCode(binary.BigEndian.Uint16(bytes[:2]))
+		ctx, cancel = context.WithCancel(context.Background())
+		cacheKey    = s.cacheKey(sender, block)
+	)
+
 	p.Store(cacheKey, cancel)
 	defer p.Delete(cacheKey)
 	defer cancel()
 
-	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
-	var start time.Time
-	code := OpCode(binary.BigEndian.Uint16(bytes[:2]))
 	for i := uint8(0); i < s.Retries; i++ {
 		if i%2 == 0 {
-			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, addr)
+			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			start = time.Now()
-			_, _ = s.conn.WriteTo(bytes, udpAddr)
+			_, _ = s.conn.WriteTo(bytes, addr)
 		} else {
-			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, addr)
+			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			check := Check{UUID: p.UUID, Block: block}
 			pkt, _ := check.Marshal()
-			_, _ = s.conn.WriteTo(pkt, udpAddr)
+			_, _ = s.conn.WriteTo(pkt, addr)
 		}
 		timer := time.After(*p.Timeout)
-		log.Printf("[%v]-[%v] current timeout: %v", p.UUID, addr, p.Timeout)
+		log.Printf("[%v]-[%v] current timeout: %dms", p.UUID, target, *p.Timeout/time.Millisecond)
 		select {
 		case <-ctx.Done():
 			roundTrip := time.Since(start)
 			*p.Timeout = *p.Timeout*8/10 + roundTrip*2/10
 			return
 		case <-timer:
+			log.Printf("[%v]-[%v] packet: %v timeout", code.String(), p.UUID, block)
 			*p.Timeout += *p.Timeout * 8 / 100
 		}
 	}
-	s.removeByAddr(addr)
-	log.Printf("[%v]-[%v]-[%s] write timeout after %d retries", code.String(), p.UUID, addr, s.Retries)
+	s.removeByAddr(target)
+	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)
 }

@@ -72,11 +72,9 @@ func (f *fileWriter) tryWrite(data Data) {
 	req := fd.req
 	fd.data = append(fd.data, data)
 	fd.Track(MonoRange(data.Block))
-	if f.received256kb(fd) {
+	if f.received256kb(fd) || fd.elapsed1Second() {
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
-		if fd.elapsed1Second() {
-			fd.updateAndReset()
-		}
+		fd.updateAndReset()
 	}
 }
 
@@ -324,14 +322,12 @@ LOOP:
 	copy(reading, c.reading.ranges)
 	for _, rg := range reading {
 		pos := (rg.start - 1) * BlockSize
-		_, err := content.Seek(int64(pos), 0)
-		if err != nil {
+		if _, err = content.Seek(int64(pos), 0); err != nil {
 			log.Printf("Seek failed: %v", err)
 		}
 		for i := rg.start; i <= rg.end; i++ {
 			d := Data{FileId: c.fileId, Block: i - 1, Payload: content}
-			err = f.writeOnce(d)
-			if err != nil {
+			if err = f.writeOnce(d); err != nil {
 				log.Printf("Send failed: %v", err)
 			}
 			if i%50 == 0 {
@@ -597,11 +593,7 @@ func (c *Client) send(req Req) error {
 	if err != nil {
 		return err
 	}
-	err = c.write(pkt, req.ID(), true)
-	if err != nil {
-		return err
-	}
-	return nil
+	return c.write(pkt, req.ID(), true)
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
@@ -639,8 +631,7 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 		Size:      size,
 		Duration:  duration,
 		CreatedAt: time.Now().UnixMilli(),
-	},
-	)
+	})
 }
 
 func (c *Client) opReady(id uint32) error {
@@ -653,8 +644,7 @@ func (c *Client) writeOnce(data Data) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
-	if err != nil {
+	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
 		return err
 	}
 	return nil
@@ -666,7 +656,6 @@ func (c *Client) SendText(text string) error {
 	if err != nil {
 		return err
 	}
-
 	return c.write(pkt, msg.SignReq.Block, true)
 }
 
@@ -718,7 +707,7 @@ LOOP:
 }
 
 func (c *Client) pull() {
-	if !c.discoveryActiveUsers() {
+	if !c.discoveryAndTrackActiveUsers() {
 		return
 	}
 	hs := c.loadHistorySet(c.Sign)
@@ -746,27 +735,26 @@ func (c *Client) pull() {
 				rg := Range{start: ranges[i].start, end: tracker.latestBlock}
 				pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: ranges[i:]}
 			}
-			err := c.send(pr)
-			if err != nil {
+
+			if err := c.send(pr); err != nil {
 				log.Printf("pull failed: %v", err)
 			}
 		}
 		pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}
-		err := c.send(pr)
-		if err != nil {
+		if err := c.send(pr); err != nil {
 			log.Printf("pull failed: %v", err)
 		}
 		return true
 	})
 }
 
-func (c *Client) discoveryActiveUsers() bool {
-	uuidSet, err := c.Discover(Active)
+func (c *Client) discoveryAndTrackActiveUsers() bool {
+	users, err := c.Discover(Active)
 	if err != nil {
 		log.Printf("discovery active users failed: %v", err)
 		return false
 	}
-	for _, uuid := range uuidSet {
+	for _, uuid := range users {
 		c.Track(&SignBody{Sign: c.Sign, UUID: uuid}, 0)
 	}
 	return true
@@ -1063,18 +1051,23 @@ func (c *Client) SetServerAddr(addr string) {
 }
 
 func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	retry, trigger := context.WithCancel(context.Background())
-	c.ackHandlers.Store(block, cancel)
-	if retryable {
-		c.retryHandlers.Store(block, trigger)
-	}
+	var (
+		ackCtx, ack     = context.WithCancel(context.Background())
+		retryCtx, retry = context.WithCancel(context.Background())
+		start           time.Time
+		code            = OpCode(binary.BigEndian.Uint16(bytes[:2]))
+	)
+	defer ack()
+	defer retry()
+
+	c.ackHandlers.Store(block, ack)
 	defer c.ackHandlers.Delete(block)
-	defer cancel()
-	defer c.retryHandlers.Delete(block)
-	defer trigger()
-	var start time.Time
-	code := OpCode(binary.BigEndian.Uint16(bytes[:2]))
+
+	if retryable {
+		c.retryHandlers.Store(block, retry)
+		defer c.retryHandlers.Delete(block)
+	}
+
 	for i := uint8(0); i < c.Retries; i++ {
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v", code.String(), block)
@@ -1088,19 +1081,19 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 		}
 	WAIT:
 		timer := time.After(c.Timeout)
-		log.Printf("current timeout: %v", c.Timeout)
+		log.Printf("current timeout: %dms", c.Timeout/time.Millisecond)
 		select {
-		case <-ctx.Done():
+		case <-ackCtx.Done():
 			elapsed := time.Since(start)
 			c.Timeout = c.Timeout*8/10 + elapsed*2/10
 			return nil
 		case <-timer:
-			log.Printf("packet: %v timeout", block)
+			log.Printf("[%v] packet: %v timeout", code.String(), block)
 			c.Timeout += c.Timeout * 8 / 100
-		case <-retry.Done():
+		case <-retryCtx.Done():
 			log.Printf("retry")
-			retry, trigger = context.WithCancel(context.Background())
-			c.retryHandlers.Store(block, trigger)
+			retryCtx, retry = context.WithCancel(context.Background())
+			c.retryHandlers.Store(block, retry)
 			_, _ = c.conn.WriteTo(bytes, c.SAddr)
 			goto WAIT
 		}
