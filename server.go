@@ -676,19 +676,20 @@ func (s *Server) dispatch(addr string, bytes []byte, sender string, block uint32
 
 	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	var start time.Time
+	code := OpCode(binary.BigEndian.Uint16(bytes[:2]))
 	for i := uint8(0); i < s.Retries; i++ {
 		if i%2 == 0 {
-			log.Printf("send packet: %v to %v", block, addr)
+			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, addr)
 			start = time.Now()
 			_, _ = s.conn.WriteTo(bytes, udpAddr)
 		} else {
-			log.Printf("send check: %v to %v", block, addr)
+			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, addr)
 			check := Check{UUID: p.UUID, Block: block}
 			pkt, _ := check.Marshal()
 			_, _ = s.conn.WriteTo(pkt, udpAddr)
 		}
 		timer := time.After(*p.Timeout)
-		log.Printf("[%v] current timeout: %v", addr, p.Timeout)
+		log.Printf("[%v]-[%v] current timeout: %v", p.UUID, addr, p.Timeout)
 		select {
 		case <-ctx.Done():
 			roundTrip := time.Since(start)
@@ -699,5 +700,5 @@ func (s *Server) dispatch(addr string, bytes []byte, sender string, block uint32
 		}
 	}
 	s.removeByAddr(addr)
-	log.Printf("[%s] write timeout after %d retries", addr, s.Retries)
+	log.Printf("[%v]-[%v]-[%s] write timeout after %d retries", code.String(), p.UUID, addr, s.Retries)
 }

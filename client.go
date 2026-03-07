@@ -3,7 +3,9 @@ package wi
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -1072,13 +1074,14 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 	defer c.retryHandlers.Delete(block)
 	defer trigger()
 	var start time.Time
+	code := OpCode(binary.BigEndian.Uint16(bytes[:2]))
 	for i := uint8(0); i < c.Retries; i++ {
 		if i%2 == 0 {
-			log.Printf("send packet: %v, type: %v", block, bytes[:2])
+			log.Printf("[%v] send packet: %v", code.String(), block)
 			start = time.Now()
 			_, _ = c.conn.WriteTo(bytes, c.SAddr)
 		} else {
-			log.Printf("send check: %v, type: %v", block, bytes[:2])
+			log.Printf("[%v] send check: %v", code.String(), block)
 			check := Check{Block: block}
 			pkt, _ := check.Marshal()
 			_, _ = c.conn.WriteTo(pkt, c.SAddr)
@@ -1102,7 +1105,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			goto WAIT
 		}
 	}
-	return errors.New("exhausted retries")
+	return errors.New(fmt.Sprintf("[%v] exhausted retries", code.String()))
 }
 
 var DefaultClient *Client

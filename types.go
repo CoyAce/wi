@@ -66,6 +66,68 @@ var rrqSet = map[OpCode]bool{
 	OpReadIcon:    true,
 }
 
+func (op *OpCode) String() string {
+	switch *op {
+	case OpRRQ:
+		return "OpRRQ"
+	case OpWRQ:
+		return "OpWRQ"
+	case OpData:
+		return "OpData"
+	case OpSign:
+		return "OpSign"
+	case OpSignOut:
+		return "SignOut"
+	case OpSignedMSG:
+		return "SignedMSG"
+	case OpAck:
+		return "Ack"
+	case OpNck:
+		return "Nck"
+	case OpErr:
+		return "Err"
+	case OpSyncIcon:
+		return "SyncIcon"
+	case OpSyncName:
+		return "SyncName"
+	case OpSendImage:
+		return "SendImage"
+	case OpSendGif:
+		return "SendGif"
+	case OpSendVoice:
+		return "SendVoice"
+	case OpAudioCall:
+		return "AudioCall"
+	case OpAcceptAudioCall:
+		return "AcceptAudioCall"
+	case OpEndAudioCall:
+		return "EndAudioCall"
+	case OpPublish:
+		return "Publish"
+	case OpSubscribe:
+		return "Subscribe"
+	case OpUnsubscribe:
+		return "Unsubscribe"
+	case OpContent:
+		return "Content"
+	case OpReady:
+		return "Ready"
+	case OpCheck:
+		return "Check"
+	case OpReadIcon:
+		return "ReadIcon"
+	case OpPull:
+		return "Pull"
+	case OpReply:
+		return "Reply"
+	case OpDiscovery:
+		return "Discovery"
+	case OpDiscoveryResp:
+		return "DiscoveryResp"
+	}
+	return "unknown"
+}
+
 func (op *OpCode) Marshal() ([]byte, error) {
 	b := new(bytes.Buffer)
 	b.Grow(2)
