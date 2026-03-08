@@ -487,7 +487,7 @@ func TestPull(t *testing.T) {
 	receiver := newClient(serverAddr, "receiver")
 	time.Sleep(1 * time.Millisecond)
 	receiver.SignIn()
-	receiver.pull()
+	receiver.Pull()
 	select {
 	case msg := <-receiver.SignedMessages:
 		if string(msg.Payload) != "hello" {
@@ -512,7 +512,7 @@ func TestPull(t *testing.T) {
 	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
 	}
-	receiver.pull()
+	receiver.Pull()
 	select {
 	case _ = <-receiver.SignedMessages:
 		t.Errorf("duplicated message")

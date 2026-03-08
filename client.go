@@ -696,7 +696,7 @@ LOOP:
 	return ret, nil
 }
 
-func (c *Client) pull() {
+func (c *Client) Pull() {
 	if !c.discoveryAndTrackActiveUsers() {
 		return
 	}
@@ -779,7 +779,6 @@ func (c *Client) ListenAndServe(addr string) {
 			close(c.Status)
 		}
 		for {
-			go c.pull()
 			time.Sleep(30 * time.Second)
 			c.SendSign()
 			c.pullTimeoutFiles()
