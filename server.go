@@ -709,7 +709,7 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 			return
 		case <-timer:
 			log.Printf("[%v]-[%v] packet: %v timeout", code.String(), p.UUID, block)
-			*p.Timeout += *p.Timeout * 8 / 100
+			*p.Timeout = min(3*time.Second, *p.Timeout*108/100)
 		}
 	}
 	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)

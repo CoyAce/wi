@@ -1081,7 +1081,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			return nil
 		case <-timer:
 			log.Printf("[%v] packet: %v timeout", code.String(), block)
-			c.Timeout += c.Timeout * 8 / 100
+			c.Timeout = min(3*time.Second, c.Timeout*108/100)
 		case <-retryCtx.Done():
 			log.Printf("retry")
 			retryCtx, retry = context.WithCancel(context.Background())
