@@ -782,10 +782,19 @@ func (c *Client) ListenAndServe(addr string) {
 			go c.pull()
 			time.Sleep(30 * time.Second)
 			c.SendSign()
+			c.pullTimeoutFiles()
 		}
 	}()
 
 	c.serve()
+}
+
+func (c *Client) pullTimeoutFiles() {
+	for _, v := range c.files {
+		if time.Since(v.updateAt) > 3*time.Second {
+			c.tryComplete(v.req.FileId)
+		}
+	}
 }
 
 func (c *Client) init() {
