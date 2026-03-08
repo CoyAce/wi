@@ -371,8 +371,7 @@ func (s *Server) toDiscoveryResp(users []string, reqID uint32) []DiscoveryResp {
 		}
 		size += n
 	}
-	ret = append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 1, UUIDS: users[prev:]})
-	return ret
+	return append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 1, UUIDS: users[prev:]})
 }
 
 func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
@@ -431,15 +430,9 @@ func (s *Server) reply(pr PullReq, addr net.Addr, ranges []Range) {
 		maxLen   = (DatagramSize - baseSize) / 8
 		req      ReplyReq
 	)
-	for i := 0; i < len(ranges); i += maxLen {
-		if i+maxLen < len(ranges) {
-			req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: ranges[i : i+maxLen]}
-			p, err = req.Marshal()
-		} else {
-			req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: ranges[i:]}
-			p, err = req.Marshal()
-		}
-		if err != nil {
+	for _, r := range partition(ranges, maxLen) {
+		req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: r}
+		if p, err = req.Marshal(); err != nil {
 			log.Printf("pull req [%s]: %v", pr.UUID, err)
 		}
 		s.dispatch(addr, p, _SERVER, req.Block)

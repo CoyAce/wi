@@ -411,3 +411,15 @@ func (c *Client) Store() {
 		log.Printf("[%s] encode file failed: %v", filePath, err)
 	}
 }
+
+func partition(ranges []Range, maxLen int) [][]Range {
+	ret := make([][]Range, 0, 10)
+	for i := 0; i < len(ranges); i += maxLen {
+		if i+maxLen < len(ranges) {
+			ret = append(ret, ranges[i:i+maxLen])
+		} else {
+			ret = append(ret, ranges[i:])
+		}
+	}
+	return ret
+}

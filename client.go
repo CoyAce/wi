@@ -717,25 +717,15 @@ func (c *Client) pull() {
 		}
 		var (
 			tracker  = value.(*RangeTracker)
-			start    = uint32(0)
 			ranges   = tracker.Get()
 			baseSize = 17 + len(uuid.(string)) + len(c.Sign)
 			maxLen   = (DatagramSize - baseSize) / 8
 			pr       *PullReq
 			signBody = SignBody{Sign: c.Sign, UUID: uuid.(string)}
 		)
-		for i := 0; i < len(ranges); i += maxLen {
-			if i+maxLen < len(ranges) {
-				if i > 0 {
-					start = ranges[i].start
-				}
-				rg := Range{start: start, end: ranges[i+maxLen-1].end}
-				pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: ranges[i : i+maxLen]}
-			} else {
-				rg := Range{start: ranges[i].start, end: tracker.latestBlock}
-				pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: ranges[i:]}
-			}
-
+		for _, r := range partition(ranges, maxLen) {
+			rg := Range{r[0].start, r[len(r)-1].end}
+			pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: r}
 			if err := c.send(pr); err != nil {
 				log.Printf("pull failed: %v", err)
 			}
@@ -1029,12 +1019,14 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: f.Get()}
-	err := c.send(&nck)
-	if err != nil {
-		log.Printf("send nck failed: %v", err)
+	const maxLen = (DatagramSize - 11) / 8
+	for _, r := range partition(f.Get(), maxLen) {
+		nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: r}
+		if err := c.send(&nck); err != nil {
+			log.Printf("send nck failed: %v", err)
+		}
+		log.Printf("request missing packets %v", nck)
 	}
-	log.Printf("request missing packets %v", nck)
 }
 
 func (c *Client) SetNickName(nickname string) {
