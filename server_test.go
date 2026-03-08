@@ -201,7 +201,7 @@ func TestPubSub(t *testing.T) {
 			t.Errorf("expected \"hello\"; actual %q", string(text))
 		}
 		_ = sub.UnsubscribeFile(1, "pub")
-		subs, ok := s.pubMap.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
+		subs, ok := s.idToSubs.Load(FilePair{FileId: wrq.FileId, UUID: wrq.UUID})
 		if !ok {
 			t.Errorf("expected pub to have file id %d", wrq.FileId)
 		}
