@@ -209,8 +209,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if !ok {
 			return
 		}
+		uuid, err := readString(b)
+		if err != nil {
+			return
+		}
 		if target, err := s.parseAddrByUUID(publisher.UUID); err == nil {
-			s.dispatch(target, pkt, _NCK, block)
+			s.dispatch(target, pkt, uuid, block)
 		}
 	case OpSignedMSG:
 		msg := new(SignedMessage)
@@ -709,7 +713,7 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 			return
 		case <-timer:
 			log.Printf("[%v]-[%v] packet: %v timeout", code.String(), p.UUID, block)
-			*p.Timeout = min(3*time.Second, *p.Timeout*108/100)
+			*p.Timeout = min(3*time.Second, *p.Timeout*108/100+10*time.Millisecond)
 		}
 	}
 	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)

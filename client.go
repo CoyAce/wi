@@ -119,13 +119,6 @@ func (f *file) getSpeed() int {
 	return int(speed)
 }
 
-func (f *fileWriter) tryNck(fd file) {
-	if fd.isCompleted() {
-		return
-	}
-	f.nck(fd)
-}
-
 func (f *fileWriter) received256kb(fd *file) bool {
 	const size = 256 * 1024 / BlockSize
 	return len(fd.data) >= size
@@ -143,7 +136,7 @@ func (f *fileWriter) init(req WriteReq) {
 		updater:      f.updaters[req.FileId],
 	}
 	f.files[req.FileId] = fd
-	f.nck(*fd)
+	go f.nck(*fd)
 }
 
 func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
@@ -180,7 +173,7 @@ func (f *fileWriter) tryComplete(id uint32) {
 		f.clean(id)
 		f.fileMessages <- req
 	} else {
-		f.nck(*fd)
+		go f.nck(*fd)
 		if fd.elapsed1Second() {
 			fd.updateAndReset()
 		}
@@ -293,17 +286,14 @@ type fileReader struct {
 }
 
 func (f *fileReader) process() {
-	for {
-		select {
-		case n := <-f.req:
-			c := f.contents[n.FileId]
-			if c == nil {
-				continue
-			}
-			c.add(n.ranges)
-			if !c.isProcessing() {
-				go f.read(n.FileId)
-			}
+	for n := range f.req {
+		c := f.contents[n.FileId]
+		if c == nil {
+			continue
+		}
+		c.add(n.ranges)
+		if !c.isProcessing() {
+			go f.read(n.FileId)
 		}
 	}
 }
@@ -956,8 +946,11 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.fileData <- data
 		}
 	case nck.Unmarshal(buf) == nil:
-		c.ack(addr, _NCK, nck.Block)
-		log.Printf("nck received")
+		c.ack(addr, nck.UUID, nck.Block)
+		if c.dup(nck.UUID, nck.Block) {
+			return
+		}
+		log.Printf("nck received, [%v]-[%v]", nck.UUID, nck.Block)
 		c.req <- nck
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
@@ -980,6 +973,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			return
 		}
 		dc.(chan DiscoveryResp) <- discovery
+	default:
+		code := OpCode(binary.BigEndian.Uint16(buf[:2]))
+		log.Printf("unknown pkt, %v, %v", code.String(), buf)
 	}
 }
 
@@ -1019,14 +1015,11 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	const maxLen = (DatagramSize - 11) / 8
-	for _, r := range partition(f.Get(), maxLen) {
-		nck := Nck{Block: c.nextID(), FileId: f.req.FileId, ranges: r}
-		if err := c.send(&nck); err != nil {
-			log.Printf("send nck failed: %v", err)
-		}
-		log.Printf("request missing packets %v", nck)
+	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, UUID: c.ID(), ranges: f.Get()}
+	if err := c.send(&nck); err != nil {
+		log.Printf("send nck failed: %v", err)
 	}
+	log.Printf("request missing packets %v", nck)
 }
 
 func (c *Client) SetNickName(nickname string) {
@@ -1081,7 +1074,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			return nil
 		case <-timer:
 			log.Printf("[%v] packet: %v timeout", code.String(), block)
-			c.Timeout = min(3*time.Second, c.Timeout*108/100)
+			c.Timeout = min(3*time.Second, c.Timeout*108/100+10*time.Millisecond)
 		case <-retryCtx.Done():
 			log.Printf("retry")
 			retryCtx, retry = context.WithCancel(context.Background())
@@ -1096,6 +1089,5 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 var DefaultClient *Client
 
 const (
-	_NCK    = "NCK"
 	_SERVER = ""
 )

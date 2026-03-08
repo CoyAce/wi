@@ -780,6 +780,7 @@ func (e *ErrCode) Unmarshal(p []byte) error {
 type Nck struct {
 	Block  uint32
 	FileId uint32
+	UUID   string
 	ranges []Range
 }
 
@@ -789,7 +790,7 @@ func (n *Nck) ID() uint32 {
 
 func (n *Nck) Marshal() ([]byte, error) {
 	// operation code + Block + fileId  + ranges count + len(ranges) * 4
-	const baseSize = 2 + 4 + 4 + 1
+	baseSize := 2 + 4 + 4 + 1 + len(n.UUID) + 1
 	size := baseSize + len(n.ranges)*8
 	b := new(bytes.Buffer)
 	if size > DatagramSize {
@@ -810,6 +811,11 @@ func (n *Nck) Marshal() ([]byte, error) {
 	}
 
 	err = binary.Write(b, binary.BigEndian, n.FileId) // write file id
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, n.UUID) // write uuid
 	if err != nil {
 		return nil, err
 	}
@@ -849,6 +855,11 @@ func (n *Nck) Unmarshal(p []byte) error {
 	}
 
 	err = binary.Read(r, binary.BigEndian, &n.FileId) // read file id
+	if err != nil {
+		return InvalidData
+	}
+
+	n.UUID, err = readString(r) // read uuid
 	if err != nil {
 		return InvalidData
 	}
