@@ -399,8 +399,10 @@ func newMessages() messages {
 }
 
 type connManager struct {
-	SAddr net.Addr `json:"-"`
-	conn  net.PacketConn
+	conn       net.PacketConn
+	remoteAddr net.Addr
+	localAddr  string
+	connFlag   int32 // 0: connected, 1: reconnecting
 }
 
 type fileManager struct {
@@ -551,7 +553,7 @@ func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) e
 	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		return err
 	}
-	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
+	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
 		return err
 	}
 	return nil
@@ -639,7 +641,7 @@ func (c *Client) writeOnce(data Data) error {
 	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		return err
 	}
-	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
+	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
 		return err
 	}
 	return nil
@@ -763,12 +765,11 @@ func (c *Client) loadRangeTracker(sign *SignBody) *RangeTracker {
 }
 
 func (c *Client) ListenAndServe(addr string) {
-	conn, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		log.Printf("[%s] dial failed: %v", addr, err)
+	c.localAddr = addr
+	if err := c.listen(); err != nil {
+		panic(err)
 	}
-	c.conn = conn
-	defer func() { _ = conn.Close() }()
+	defer func() { _ = c.conn.Close() }()
 
 	// init
 	c.init()
@@ -776,7 +777,7 @@ func (c *Client) ListenAndServe(addr string) {
 	go c.loop()
 	go c.process()
 
-	c.SAddr, err = net.ResolveUDPAddr("udp", c.ServerAddr)
+	c.remoteAddr, _ = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
 		// auto reconnect in case of server restart
 		c.SendSign()
@@ -817,7 +818,7 @@ func (c *Client) SendSign() {
 	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
-	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
+	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
 }
@@ -848,9 +849,33 @@ func (c *Client) SignOut() {
 	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
-	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
+	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
+}
+
+func (c *Client) reconnect() {
+	if !atomic.CompareAndSwapInt32(&c.connFlag, 0, 1) {
+		log.Printf("reconnect already in progress, skipping")
+		return
+	}
+	defer atomic.StoreInt32(&c.connFlag, 0)
+	if c.conn != nil {
+		c.conn.Close()
+	}
+	if err := c.listen(); err != nil {
+		panic(err)
+	}
+	log.Printf("reconnected")
+}
+
+func (c *Client) listen() error {
+	var err error
+	if c.conn, err = net.ListenPacket("udp", c.localAddr); err != nil {
+		log.Printf("[%s] listen failed: %v", c.localAddr, err)
+		return err
+	}
+	return nil
 }
 
 func (c *Client) serve() {
@@ -1050,7 +1075,7 @@ func (c *Client) SetSign(sign string) {
 
 func (c *Client) SetServerAddr(addr string) {
 	c.ServerAddr = addr
-	c.SAddr, _ = net.ResolveUDPAddr("udp", addr)
+	c.remoteAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
 func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
@@ -1079,15 +1104,18 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v", code.String(), block)
 			start = time.Now()
-			_, err = c.conn.WriteTo(bytes, c.SAddr)
+			_, err = c.conn.WriteTo(bytes, c.remoteAddr)
 		} else {
 			log.Printf("[%v] send check: %v", code.String(), block)
 			check := Check{Block: block}
 			pkt, _ := check.Marshal()
-			_, err = c.conn.WriteTo(pkt, c.SAddr)
+			_, err = c.conn.WriteTo(pkt, c.remoteAddr)
 		}
 		if err != nil {
 			log.Printf("[%v] write failed: %v", code.String(), err)
+			if errors.Is(err, syscall.EPIPE) {
+				c.reconnect()
+			}
 			continue
 		}
 	WAIT:
@@ -1108,7 +1136,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 				log.Printf("[%v] write failed: %v", code.String(), err)
 			}
-			if _, err = c.conn.WriteTo(bytes, c.SAddr); err != nil {
+			if _, err = c.conn.WriteTo(bytes, c.remoteAddr); err != nil {
 				log.Printf("[%v] write failed: %v", code.String(), err)
 			}
 			goto WAIT
