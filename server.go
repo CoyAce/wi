@@ -493,7 +493,13 @@ func (s *Server) relayToSubscribers(wrq WriteReq, pkt []byte) {
 		if err != nil {
 			return true
 		}
-		_, _ = s.conn.WriteTo(pkt, addr)
+		if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+			log.Printf("relay to subscriber [%v] failed, %v", k.(string), err)
+			return true
+		}
+		if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+			log.Printf("relay to subscriber [%v] failed,%v", k.(string), err)
+		}
 		return true
 	})
 }
@@ -539,7 +545,12 @@ func (s *Server) deleteSub(rrq ReadReq) {
 func (s *Server) reject(addr net.Addr) {
 	err := ErrUnknownUser
 	p, _ := err.Marshal()
-	_, _ = s.conn.WriteTo(p, addr)
+	if e := s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); e != nil {
+		log.Printf("reject [%v] failed, %v", addr.String(), e)
+	}
+	if _, e := s.conn.WriteTo(p, addr); e != nil {
+		log.Printf("reject [%v] failed, %v", addr.String(), e)
+	}
 }
 
 func (s *Server) relayAudioStream(fileId uint32, pkt []byte, sender net.Addr) {
@@ -558,7 +569,13 @@ func (s *Server) relayAudioStream(fileId uint32, pkt []byte, sender net.Addr) {
 			if err != nil {
 				return true
 			}
-			_, _ = s.conn.WriteTo(pkt, addr)
+			if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+				log.Printf("relay audio stream to receiver [%v] failed,%v", key.(string), err)
+				return true
+			}
+			if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+				log.Printf("relay audio stream to receiver [%v] failed,%v", key.(string), err)
+			}
 		}
 		return true
 	})
@@ -568,8 +585,18 @@ func (s *Server) directRelay(sign *SignBody, pkt []byte) {
 	s.addrToPeer.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
-			addr, _ := net.ResolveUDPAddr("udp", key.(string))
-			_, _ = s.conn.WriteTo(pkt, addr)
+			addr, err := net.ResolveUDPAddr("udp", key.(string))
+			if err != nil {
+				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
+				return true
+			}
+			if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
+				return true
+			}
+			if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
+			}
 		}
 		return true
 	})
@@ -619,9 +646,11 @@ func (s *Server) findSignByFileId(fileId uint32) (*SignBody, bool) {
 func (s *Server) ack(addr net.Addr, block uint32) {
 	ack := Ack{Block: block}
 	pkt, err := ack.Marshal()
-	_, err = s.conn.WriteTo(pkt, addr)
-	if err != nil {
-		log.Printf("[%s] write failed: %v", addr, err)
+	if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		log.Printf("[%s] ack failed: %v", addr, err)
+	}
+	if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+		log.Printf("[%s] ack failed: %v", addr, err)
 		return
 	}
 }
@@ -679,6 +708,7 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 		return
 	}
 	var (
+		err         error
 		p           = v.(Peer)
 		start       time.Time
 		code        = OpCode(binary.BigEndian.Uint16(bytes[:2]))
@@ -694,15 +724,21 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 		if _, ok = s.addrToPeer.Load(target); !ok {
 			return
 		}
+		if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
+		}
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			start = time.Now()
-			_, _ = s.conn.WriteTo(bytes, addr)
+			_, err = s.conn.WriteTo(bytes, addr)
 		} else {
 			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			check := Check{UUID: p.UUID, Block: block}
 			pkt, _ := check.Marshal()
-			_, _ = s.conn.WriteTo(pkt, addr)
+			_, err = s.conn.WriteTo(pkt, addr)
+		}
+		if err != nil {
+			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
 		}
 		timer := time.After(*p.Timeout)
 		log.Printf("[%v]-[%v] current timeout: %dms", p.UUID, target, *p.Timeout/time.Millisecond)
@@ -716,5 +752,6 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 			*p.Timeout = min(3*time.Second, *p.Timeout*108/100+10*time.Millisecond)
 		}
 	}
+	_ = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
 	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)
 }

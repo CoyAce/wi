@@ -548,8 +548,10 @@ func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) e
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
-	if err != nil {
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		return err
+	}
+	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
 		return err
 	}
 	return nil
@@ -632,6 +634,9 @@ func (c *Client) opReady(id uint32) error {
 func (c *Client) writeOnce(data Data) error {
 	pkt, err := data.Marshal()
 	if err != nil {
+		return err
+	}
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		return err
 	}
 	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
@@ -809,10 +814,11 @@ func (c *Client) SendSign() {
 	if err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
-	if err != nil {
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-		return
+	}
+	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
+		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
 }
 
@@ -839,8 +845,10 @@ func (c *Client) SignOut() {
 	if err != nil {
 		log.Printf("marshal failed: %v", err)
 	}
-	_, err = c.conn.WriteTo(pkt, c.SAddr)
-	if err != nil {
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
+	}
+	if _, err = c.conn.WriteTo(pkt, c.SAddr); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
 }
@@ -849,14 +857,14 @@ func (c *Client) serve() {
 	log.Printf("Listening on %s ...\n", c.conn.LocalAddr())
 	for {
 		buf := make([]byte, DatagramSize)
-		_ = c.conn.SetReadDeadline(time.Now().Add(c.Timeout))
+		_ = c.conn.SetReadDeadline(time.Now().Add(_TIMEOUT))
 		n, addr, err := c.conn.ReadFrom(buf)
 		if err != nil {
-			var nErr net.Error
-			if errors.As(err, &nErr) && nErr.Timeout() {
+			if nErr, ok := errors.AsType[net.Error](err); ok && nErr.Timeout() {
 				//log.Printf("receive text timeout")
 			}
 			if errors.Is(err, syscall.ECONNREFUSED) {
+				_ = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
 				log.Printf("[%s] connection refused", c.ServerAddr)
 			}
 			//log.Printf("[%s] receive text: %v", c.ServerAddr, err)
@@ -1016,16 +1024,18 @@ func (c *Client) check(UUID string, block uint32) bool {
 func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 	ack := Ack{Block: block, UUID: UUID}
 	pkt, err := ack.Marshal()
-	_, err = c.conn.WriteTo(pkt, addr)
-	if err != nil {
-		log.Printf("[%s] write failed: %v", addr, err)
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		log.Printf("[%s] ack failed: %v", addr, err)
+	}
+	if _, err = c.conn.WriteTo(pkt, addr); err != nil {
+		log.Printf("[%s] ack failed: %v", addr, err)
 	}
 }
 
 func (c *Client) nck(f file) {
 	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, UUID: c.ID(), ranges: f.Get()}
 	if err := c.send(&nck); err != nil {
-		log.Printf("send nck failed: %v", err)
+		log.Printf("nck failed: %v", err)
 	}
 	log.Printf("request missing packets %v", nck)
 }
@@ -1049,6 +1059,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 		retryCtx, retry = context.WithCancel(context.Background())
 		start           time.Time
 		code            = OpCode(binary.BigEndian.Uint16(bytes[:2]))
+		err             error
 	)
 	defer ack()
 	defer retry()
@@ -1062,15 +1073,22 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 	}
 
 	for i := uint8(0); i < c.Retries; i++ {
+		if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+			log.Printf("[%v] write failed: %v", code.String(), err)
+		}
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v", code.String(), block)
 			start = time.Now()
-			_, _ = c.conn.WriteTo(bytes, c.SAddr)
+			_, err = c.conn.WriteTo(bytes, c.SAddr)
 		} else {
 			log.Printf("[%v] send check: %v", code.String(), block)
 			check := Check{Block: block}
 			pkt, _ := check.Marshal()
-			_, _ = c.conn.WriteTo(pkt, c.SAddr)
+			_, err = c.conn.WriteTo(pkt, c.SAddr)
+		}
+		if err != nil {
+			log.Printf("[%v] write failed: %v", code.String(), err)
+			continue
 		}
 	WAIT:
 		timer := time.After(c.Timeout)
@@ -1087,15 +1105,22 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			log.Printf("retry")
 			retryCtx, retry = context.WithCancel(context.Background())
 			c.retryHandlers.Store(block, retry)
-			_, _ = c.conn.WriteTo(bytes, c.SAddr)
+			if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+				log.Printf("[%v] write failed: %v", code.String(), err)
+			}
+			if _, err = c.conn.WriteTo(bytes, c.SAddr); err != nil {
+				log.Printf("[%v] write failed: %v", code.String(), err)
+			}
 			goto WAIT
 		}
 	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
 	return errors.New(fmt.Sprintf("[%v] exhausted retries", code.String()))
 }
 
 var DefaultClient *Client
 
 const (
-	_SERVER = ""
+	_SERVER  = ""
+	_TIMEOUT = 3 * time.Second
 )
