@@ -414,6 +414,7 @@ func (s *Server) collectActiveUsers(sign string) []string {
 func (s *Server) push(pr PullReq, addr net.Addr) {
 	h := s.loadHistory(&pr.SignBody)
 	if pr.end == math.MaxUint32 {
+		s.reply(pr, addr, h.Get())
 		s.pushRange(pr, addr, h, Range{pr.start, h.nextBlock()})
 		return
 	}

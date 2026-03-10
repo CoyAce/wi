@@ -512,15 +512,15 @@ func TestPull(t *testing.T) {
 	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
 	}
+	tracker := receiver.loadRangeTracker(&SignBody{Sign: receiver.Sign, UUID: sender.ID()})
+	if !tracker.isCompleted() {
+		t.Errorf("tracker not completed")
+	}
 	receiver.Pull()
 	select {
 	case _ = <-receiver.SignedMessages:
 		t.Errorf("duplicated message")
 	default:
-	}
-	tracker := receiver.loadRangeTracker(&SignBody{Sign: receiver.Sign, UUID: sender.ID()})
-	if !tracker.isCompleted() {
-		t.Errorf("tracker not completed")
 	}
 }
 

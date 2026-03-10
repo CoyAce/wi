@@ -704,47 +704,80 @@ LOOP:
 }
 
 func (c *Client) Pull() {
-	if !c.discoveryAndTrackActiveUsers() {
+	hs := c.loadHistorySet(c.Sign)
+	knownUsers := c.getUsers(hs)
+	go c.pullMessagesOfUnknownUsers(hs)
+	go c.pullTimeoutFiles()
+	c.pullMessagesOf(knownUsers, hs)
+}
+
+func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map) {
+	var (
+		unknown []string
+		err     error
+	)
+	if unknown, err = c.getUnknownUsers(hs); err != nil {
+		log.Printf("pull messages of unknown users failed: %v", err)
 		return
 	}
-	hs := c.loadHistorySet(c.Sign)
+	for _, u := range unknown {
+		c.Track(&SignBody{Sign: c.Sign, UUID: u}, 0)
+	}
+	c.pullMessagesOf(unknown, hs)
+}
+
+func (c *Client) pullMessagesOf(users []string, hs *sync.Map) {
+	for _, user := range users {
+		if t, ok := hs.Load(user); ok {
+			go c.pullMessages(user, t.(*RangeTracker))
+		}
+	}
+}
+
+func (c *Client) getUnknownUsers(hs *sync.Map) ([]string, error) {
+	users, err := c.Discover(Active)
+	if err != nil {
+		return nil, err
+	}
+	unknown := make([]string, 0)
+	for _, u := range users {
+		if _, ok := hs.Load(u); !ok && u != c.ID() {
+			unknown = append(unknown, u)
+		}
+	}
+	return unknown, nil
+}
+
+func (c *Client) getUsers(hs *sync.Map) []string {
+	users := make([]string, 0)
 	hs.Range(func(uuid, value interface{}) bool {
-		if uuid == c.ID() {
-			return true
-		}
-		var (
-			tracker  = value.(*RangeTracker)
-			ranges   = tracker.Get()
-			baseSize = 17 + len(uuid.(string)) + len(c.Sign)
-			maxLen   = (DatagramSize - baseSize) / 8
-			pr       *PullReq
-			signBody = SignBody{Sign: c.Sign, UUID: uuid.(string)}
-		)
-		for _, r := range partition(ranges, maxLen) {
-			rg := Range{r[0].start, r[len(r)-1].end}
-			pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: r}
-			if err := c.send(pr); err != nil {
-				log.Printf("pull failed: %v", err)
-			}
-		}
-		pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}
-		if err := c.send(pr); err != nil {
-			log.Printf("pull failed: %v", err)
+		if uuid != c.ID() {
+			users = append(users, uuid.(string))
 		}
 		return true
 	})
+	return users
 }
 
-func (c *Client) discoveryAndTrackActiveUsers() bool {
-	users, err := c.Discover(Active)
-	if err != nil {
-		log.Printf("discovery active users failed: %v", err)
-		return false
+func (c *Client) pullMessages(UUID string, tracker *RangeTracker) {
+	var (
+		ranges   = tracker.Get()
+		baseSize = 17 + len(UUID) + len(c.Sign)
+		maxLen   = (DatagramSize - baseSize) / 8
+		pr       *PullReq
+		signBody = SignBody{Sign: c.Sign, UUID: UUID}
+	)
+	for _, r := range partition(ranges, maxLen) {
+		rg := Range{r[0].start, r[len(r)-1].end}
+		pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: r}
+		if err := c.send(pr); err != nil {
+			log.Printf("pull failed: %v", err)
+		}
 	}
-	for _, uuid := range users {
-		c.Track(&SignBody{Sign: c.Sign, UUID: uuid}, 0)
+	pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}
+	if err := c.send(pr); err != nil {
+		log.Printf("pull failed: %v", err)
 	}
-	return true
 }
 
 func (c *Client) loadHistorySet(sign string) *sync.Map {
@@ -1003,7 +1036,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case reply.Unmarshal(buf) == nil:
 		c.ack(addr, _SERVER, reply.Block)
 		tracker := c.loadRangeTracker(&reply.SignBody)
-		tracker.Exclude(reply.ranges)
+		for _, r := range reply.ranges {
+			tracker.Track(r)
+		}
 	case discovery.Unmarshal(buf) == nil:
 		c.ack(addr, _SERVER, discovery.Block)
 		dc, ok := c.discoveries.Load(discovery.ReqID)
