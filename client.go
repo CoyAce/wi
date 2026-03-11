@@ -375,7 +375,7 @@ type messages struct {
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	Retries        uint8              `json:"-"` // the number of times to retry a failed transmission
-	Timeout        time.Duration      `json:"-"` // the duration to wait for an acknowledgement
+	RTO            time.Duration      `json:"-"` // retransmission timeout
 	history        sync.Map           // sign -> *sync.Map { uuid -> *RangeTracker }
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
@@ -390,7 +390,7 @@ func (c *Client) nextID() uint32 {
 func newMessages() messages {
 	return messages{
 		Retries:        18,
-		Timeout:        500 * time.Millisecond,
+		RTO:            500 * time.Millisecond,
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),
 		SubMessages:    make(chan ReadReq, 20),
@@ -1154,16 +1154,16 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			continue
 		}
 	WAIT:
-		timer := time.After(c.Timeout)
-		log.Printf("current timeout: %dms", c.Timeout/time.Millisecond)
+		timer := time.After(c.RTO)
+		log.Printf("current timeout: %dms", c.RTO/time.Millisecond)
 		select {
 		case <-ackCtx.Done():
-			elapsed := time.Since(start)
-			c.Timeout = c.Timeout*8/10 + elapsed*2/10
+			RTT := time.Since(start)
+			c.RTO = c.RTO*8/10 + RTT*2/10
 			return nil
 		case <-timer:
 			log.Printf("[%v] packet: %v timeout", code.String(), block)
-			c.Timeout = min(3*time.Second, c.Timeout*108/100+10*time.Millisecond)
+			c.RTO = min(3*time.Second, c.RTO*108/100+10*time.Millisecond)
 		case <-retryCtx.Done():
 			log.Printf("retry")
 			retryCtx, retry = context.WithCancel(context.Background())

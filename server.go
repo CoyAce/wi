@@ -15,10 +15,10 @@ import (
 )
 
 type Peer struct {
-	*SignBody     // identity
-	*sync.Map     // block -> CancelFunc
-	*RangeTracker // block tracker
-	Timeout       *time.Duration
+	*SignBody                    // identity
+	*sync.Map                    // block -> CancelFunc
+	*RangeTracker                // block tracker
+	RTO           *time.Duration // retransmission timeout
 }
 
 func (p Peer) ack(cacheKey string) {
@@ -79,7 +79,7 @@ func (s *addrStore) removeByAddr(addr string) {
 
 func (s *addrStore) updatePeer(sign *SignBody, addr net.Addr) Peer {
 	timeout := 500 * time.Millisecond
-	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), Timeout: &timeout}
+	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), RTO: &timeout}
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
 		p = v.(Peer)
 		p.SignBody = sign
@@ -699,7 +699,7 @@ func (s *Server) cacheKey(UUID string, block uint32) string {
 }
 
 // dispatch may block by slow connection
-func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint32) {
+func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint32) {
 	var (
 		target = addr.String()
 		v      any
@@ -712,7 +712,7 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 		err         error
 		p           = v.(Peer)
 		start       time.Time
-		code        = OpCode(binary.BigEndian.Uint16(bytes[:2]))
+		code        = OpCode(binary.BigEndian.Uint16(data[:2]))
 		ctx, cancel = context.WithCancel(context.Background())
 		cacheKey    = s.cacheKey(sender, block)
 	)
@@ -731,7 +731,7 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			start = time.Now()
-			_, err = s.conn.WriteTo(bytes, addr)
+			_, err = s.conn.WriteTo(data, addr)
 		} else {
 			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			check := Check{UUID: p.UUID, Block: block}
@@ -741,16 +741,16 @@ func (s *Server) dispatch(addr net.Addr, bytes []byte, sender string, block uint
 		if err != nil {
 			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
 		}
-		timer := time.After(*p.Timeout)
-		log.Printf("[%v]-[%v] current timeout: %dms", p.UUID, target, *p.Timeout/time.Millisecond)
+		timer := time.After(*p.RTO)
+		log.Printf("[%v]-[%v] current timeout: %dms", p.UUID, target, *p.RTO/time.Millisecond)
 		select {
 		case <-ctx.Done():
-			roundTrip := time.Since(start)
-			*p.Timeout = *p.Timeout*8/10 + roundTrip*2/10
+			RTT := time.Since(start)
+			*p.RTO = *p.RTO*8/10 + RTT*2/10
 			return
 		case <-timer:
 			log.Printf("[%v]-[%v] packet: %v timeout", code.String(), p.UUID, block)
-			*p.Timeout = min(3*time.Second, *p.Timeout*108/100+10*time.Millisecond)
+			*p.RTO = min(3*time.Second, *p.RTO*108/100+10*time.Millisecond)
 		}
 	}
 	_ = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
