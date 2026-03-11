@@ -43,6 +43,7 @@ const (
 	OpReply
 	OpDiscovery
 	OpDiscoveryResp
+	OpRck
 )
 
 var wrqSet = map[OpCode]bool{
@@ -124,6 +125,8 @@ func (op *OpCode) String() string {
 		return "Discovery"
 	case OpDiscoveryResp:
 		return "DiscoveryResp"
+	case OpRck:
+		return "Rck"
 	}
 	return "unknown"
 }
@@ -674,13 +677,83 @@ func (c *Check) Unmarshal(p []byte) error {
 	return nil
 }
 
+type Rck struct {
+	Block uint32
+	ReqID uint32
+	UUID  string
+}
+
+func (r *Rck) ID() uint32 {
+	return r.Block
+}
+
+func (r *Rck) Marshal() ([]byte, error) {
+	size := 2 + 4 + 4 + len(r.UUID) + 1 // operation code  + block number + req id + uuid
+
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpRck)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, r.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, r.ReqID) // write req id
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, r.UUID) // write uuid
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (r *Rck) Unmarshal(p []byte) error {
+	var code OpCode
+	b := bytes.NewBuffer(p)
+
+	err := binary.Read(b, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpRck {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &r.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &r.ReqID) // read req id
+	if err != nil {
+		return InvalidData
+	}
+
+	r.UUID, err = readString(b) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
+}
+
 type Ack struct {
 	Block uint32
 	UUID  string
 }
 
 func (a *Ack) Marshal() ([]byte, error) {
-	size := 2 + 4 + len(a.UUID) + 1 // operation code  + block number
+	size := 2 + 4 + len(a.UUID) + 1 // operation code  + block number + uuid
 
 	b := new(bytes.Buffer)
 	b.Grow(size)

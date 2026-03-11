@@ -301,6 +301,7 @@ func (f *fileReader) process() {
 func (f *fileReader) read(id uint32) {
 	c := f.contents[id]
 	c.setProcessing()
+	defer c.unsetProcessing()
 	content, err := c.content()
 	if err != nil {
 		log.Printf("read file failed: %v", err)
@@ -330,9 +331,7 @@ LOOP:
 		c.swap()
 		goto LOOP
 	}
-	c.unsetProcessing()
-	err = f.opReady(id)
-	if err != nil {
+	if err = f.opReady(id); err != nil {
 		log.Printf("Ready failed: %v", err)
 	}
 }
@@ -379,8 +378,35 @@ type messages struct {
 	history        sync.Map           // sign -> *sync.Map { uuid -> *RangeTracker }
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
-	trackers       sync.Map           // uuid -> *RangeTracker
+	tracker        tracker            // tracker track all received packets
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
+	checkCache     sync.Map           // cache key -> chan reqID
+}
+
+type tracker struct {
+	sync.Map // uuid -> *RangeTracker
+}
+
+func (t *tracker) loadTracker(UUID string) *RangeTracker {
+	if v, ok := t.Load(UUID); ok {
+		return v.(*RangeTracker)
+	}
+	v, _ := t.LoadOrStore(UUID, new(RangeTracker))
+	return v.(*RangeTracker)
+}
+
+func (t *tracker) check(UUID string, block uint32) bool {
+	return t.loadTracker(UUID).Contains(MonoRange(block))
+}
+
+func (t *tracker) dup(UUID string, block uint32) bool {
+	tracker := t.loadTracker(UUID)
+	r := MonoRange(block)
+	if tracker.Contains(r) {
+		return true
+	}
+	tracker.Track(r)
+	return false
 }
 
 func (c *Client) nextID() uint32 {
@@ -660,10 +686,10 @@ func (c *Client) SyncName(oldUUID string) {
 	nameReq := CtrlReq{Code: OpSyncName, Block: c.nextID(), Target: oldUUID, UUID: c.ID()}
 	pkt, err := nameReq.Marshal()
 	if err != nil {
-		panic(err)
+		log.Printf("name req marshal failed, %v", err)
+		return
 	}
-	err = c.write(pkt, nameReq.Block, true)
-	if err != nil {
+	if err = c.write(pkt, nameReq.Block, true); err != nil {
 		log.Printf("sync name: %v", err)
 	}
 }
@@ -682,17 +708,44 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 	resp := make(chan DiscoveryResp, 150)
 	c.discoveries.Store(reqID, resp)
 	defer c.discoveries.Delete(reqID)
+	check := make(chan struct{}, 1)
+	key := newCacheKey(c.ID(), reqID)
+	c.checkCache.Store(key, check)
+	defer c.checkCache.Delete(key)
+
 	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
 		log.Printf("discovery failed: %v", err)
 	}
+	rt := new(RangeTracker)
 	ret := make([]string, 0)
+	final := false
 LOOP:
 	for {
 		timer := time.After(10 * time.Second)
 		select {
 		case d := <-resp:
+			r := MonoRange(d.Block)
+			if rt.Contains(r) {
+				continue
+			}
 			ret = append(ret, d.UUIDS...)
+			rt.Track(r)
 			if d.Final == 1 {
+				final = true
+				if rt.isCompleted() {
+					c.rck(c.remoteAddr, c.ID(), rt.nextBlock(), reqID)
+					break LOOP
+				}
+			}
+		case <-check:
+			var next uint32
+			if rt.isCompleted() {
+				next = rt.nextBlock()
+			} else {
+				next = rt.Get()[0].start
+			}
+			c.rck(c.remoteAddr, c.ID(), next, reqID)
+			if final && rt.isCompleted() {
 				break LOOP
 			}
 		case <-timer:
@@ -954,8 +1007,10 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 		cancel.(context.CancelFunc)()
 	case check.Unmarshal(buf) == nil:
-		if c.check(check.UUID, check.Block) {
+		if c.tracker.check(check.UUID, check.Block) {
 			c.ack(addr, check.UUID, check.Block)
+		} else if v, ok := c.checkCache.Load(newCacheKey(check.UUID, check.Block)); ok {
+			v.(chan struct{}) <- struct{}{}
 		}
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.UUID, msg.Block)
@@ -1039,12 +1094,8 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			tracker.Track(r)
 		}
 	case discovery.Unmarshal(buf) == nil:
-		c.ack(addr, _SERVER, discovery.Block)
 		dc, ok := c.discoveries.Load(discovery.ReqID)
 		if !ok {
-			return
-		}
-		if c.dup(_SERVER, discovery.Block) {
 			return
 		}
 		dc.(chan DiscoveryResp) <- discovery
@@ -1055,29 +1106,11 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 }
 
 func (c *Client) dup(UUID string, block uint32) bool {
-	t := c.loadTracker(UUID)
-	r := MonoRange(block)
-	dup := t.Contains(r)
-	if !dup {
-		t.Track(r)
-		if UUID != _SERVER {
-			c.Track(&SignBody{Sign: c.Sign, UUID: UUID}, block)
-		}
+	dup := c.tracker.dup(UUID, block)
+	if !dup && UUID != _SERVER {
+		c.Track(&SignBody{Sign: c.Sign, UUID: UUID}, block)
 	}
 	return dup
-}
-
-func (c *Client) loadTracker(UUID string) *RangeTracker {
-	if v, ok := c.trackers.Load(UUID); ok {
-		return v.(*RangeTracker)
-	}
-	v, _ := c.trackers.LoadOrStore(UUID, new(RangeTracker))
-	return v.(*RangeTracker)
-}
-
-func (c *Client) check(UUID string, block uint32) bool {
-	t := c.loadTracker(UUID)
-	return t.Contains(MonoRange(block))
 }
 
 func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
@@ -1088,6 +1121,17 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 	}
 	if _, err = c.conn.WriteTo(pkt, addr); err != nil {
 		log.Printf("[%s] ack failed: %v", addr, err)
+	}
+}
+
+func (c *Client) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
+	rck := Rck{Block: block, ReqID: reqID, UUID: UUID}
+	pkt, err := rck.Marshal()
+	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		log.Printf("[%s] rck failed: %v", addr, err)
+	}
+	if _, err = c.conn.WriteTo(pkt, addr); err != nil {
+		log.Printf("[%s] rck failed: %v", addr, err)
 	}
 }
 
@@ -1176,7 +1220,6 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			goto WAIT
 		}
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
 	return errors.New(fmt.Sprintf("[%v] exhausted retries", code.String()))
 }
 

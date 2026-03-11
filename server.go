@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,7 +17,7 @@ import (
 
 type Peer struct {
 	*SignBody                    // identity
-	*sync.Map                    // block -> CancelFunc
+	*sync.Map                    // cache key -> CancelFunc
 	*RangeTracker                // block tracker
 	RTO           *time.Duration // retransmission timeout
 }
@@ -78,8 +79,7 @@ func (s *addrStore) removeByAddr(addr string) {
 }
 
 func (s *addrStore) updatePeer(sign *SignBody, addr net.Addr) Peer {
-	timeout := 500 * time.Millisecond
-	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), RTO: &timeout}
+	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), RTO: new(500 * time.Millisecond)}
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
 		p = v.(Peer)
 		p.SignBody = sign
@@ -93,6 +93,7 @@ type Server struct {
 	idToFiles sync.Map      // fileId -> wrq
 	idToSubs  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	history   sync.Map      // sign -> *sync.Map { uuid -> *history }
+	rckCache  sync.Map      // cache key -> rck
 	addrStore
 	*audioManager
 	counter uint32
@@ -178,9 +179,9 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if ack.Unmarshal(pkt) != nil {
 			return
 		}
-		log.Printf("ack received: %v", ack.Block)
+		log.Printf("ack received: %v", ack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).ack(s.cacheKey(ack.UUID, ack.Block))
+			p.(Peer).ack(newCacheKey(ack.UUID, ack.Block))
 		}
 	case OpCheck:
 		var block uint32
@@ -264,6 +265,15 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.sendUsers(drq, addr)
+	case OpRck:
+		var rck Rck
+		if rck.Unmarshal(pkt) != nil {
+			return
+		}
+		log.Printf("rck received: %v", rck)
+		if c, ok := s.rckCache.Load(newCacheKey(rck.UUID, rck.ReqID)); ok {
+			c.(chan uint32) <- rck.Block
+		}
 	default:
 		var (
 			rrq  ReadReq
@@ -353,29 +363,38 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 
 func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
-	for _, d := range s.toDiscoveryResp(users, drq.Block) {
+	resp := s.toDiscoveryResp(users, drq.Block)
+	packets := make([]Packet, 0, len(resp))
+	for i, d := range resp {
 		v, err := d.Marshal()
 		if err != nil {
 			log.Printf("discovery marshal failed: %v", err)
 		}
-		s.dispatch(addr, v, _SERVER, d.Block)
+		packets = append(packets, Packet{Block: uint32(i + 1), Data: v})
 	}
+	v, ok := s.addrToPeer.Load(addr.String())
+	if !ok {
+		return
+	}
+	s.dispatchInOrder(addr, packets, v.(Peer).UUID, drq.Block)
 }
 
 func (s *Server) toDiscoveryResp(users []string, reqID uint32) []DiscoveryResp {
 	const maxSize = DatagramSize - 12
 	ret := make([]DiscoveryResp, 0, 20)
 	prev, size := 0, 0
+	index := uint32(1)
 	for i := 0; i < len(users); i++ {
 		n := 1 + len(users[i])
 		if size+n > maxSize {
-			ret = append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 0, UUIDS: users[prev:i]})
+			ret = append(ret, DiscoveryResp{Block: index, ReqID: reqID, Final: 0, UUIDS: users[prev:i]})
+			index++
 			prev = i
 			size = 0
 		}
 		size += n
 	}
-	return append(ret, DiscoveryResp{Block: s.nextID(), ReqID: reqID, Final: 1, UUIDS: users[prev:]})
+	return append(ret, DiscoveryResp{Block: index, ReqID: reqID, Final: 1, UUIDS: users[prev:]})
 }
 
 func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
@@ -490,15 +509,9 @@ func (s *Server) relayToSubscribers(wrq WriteReq, pkt []byte) {
 		return
 	}
 	subs.(*sync.Map).Range(func(k, v interface{}) bool {
-		addr, err := s.parseAddrByUUID(k.(string))
-		if err != nil {
+		if addr, err := s.parseAddrByUUID(k.(string)); err != nil {
 			return true
-		}
-		if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-			log.Printf("relay to subscriber [%v] failed, %v", k.(string), err)
-			return true
-		}
-		if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+		} else if err = s.writePacket(addr, pkt); err != nil {
 			log.Printf("relay to subscriber [%v] failed,%v", k.(string), err)
 		}
 		return true
@@ -544,13 +557,10 @@ func (s *Server) deleteSub(rrq ReadReq) {
 }
 
 func (s *Server) reject(addr net.Addr) {
-	err := ErrUnknownUser
-	p, _ := err.Marshal()
-	if e := s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); e != nil {
-		log.Printf("reject [%v] failed, %v", addr.String(), e)
-	}
-	if _, e := s.conn.WriteTo(p, addr); e != nil {
-		log.Printf("reject [%v] failed, %v", addr.String(), e)
+	if p, err := new(ErrUnknownUser).Marshal(); err != nil {
+		log.Printf("reject [%v] failed, %v", addr.String(), err)
+	} else if err = s.writePacket(addr, p); err != nil {
+		log.Printf("reject [%v] failed, %v", addr.String(), err)
 	}
 }
 
@@ -566,15 +576,9 @@ func (s *Server) relayAudioStream(fileId uint32, pkt []byte, sender net.Addr) {
 	}
 	receivers.(*sync.Map).Range(func(key, value interface{}) bool {
 		if key != UUID {
-			addr, err := s.parseAddrByUUID(key.(string))
-			if err != nil {
-				return true
-			}
-			if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+			if addr, err := s.parseAddrByUUID(key.(string)); err != nil {
 				log.Printf("relay audio stream to receiver [%v] failed,%v", key.(string), err)
-				return true
-			}
-			if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+			} else if err = s.writePacket(addr, pkt); err != nil {
 				log.Printf("relay audio stream to receiver [%v] failed,%v", key.(string), err)
 			}
 		}
@@ -586,16 +590,9 @@ func (s *Server) directRelay(sign *SignBody, pkt []byte) {
 	s.addrToPeer.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
-			addr, err := net.ResolveUDPAddr("udp", key.(string))
-			if err != nil {
+			if addr, err := net.ResolveUDPAddr("udp", key.(string)); err != nil {
 				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
-				return true
-			}
-			if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
-				return true
-			}
-			if _, err = s.conn.WriteTo(pkt, addr); err != nil {
+			} else if err = s.writePacket(addr, pkt); err != nil {
 				log.Printf("direct relay to [%v] failed,%v", p.UUID, err)
 			}
 		}
@@ -645,14 +642,10 @@ func (s *Server) findSignByFileId(fileId uint32) (*SignBody, bool) {
 }
 
 func (s *Server) ack(addr net.Addr, block uint32) {
-	ack := Ack{Block: block}
-	pkt, err := ack.Marshal()
-	if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+	if pkt, err := new(Ack{Block: block}).Marshal(); err != nil {
+		log.Printf("ack [%v] failed, %v", addr.String(), err)
+	} else if err = s.writePacket(addr, pkt); err != nil {
 		log.Printf("[%s] ack failed: %v", addr, err)
-	}
-	if _, err = s.conn.WriteTo(pkt, addr); err != nil {
-		log.Printf("[%s] ack failed: %v", addr, err)
-		return
 	}
 }
 
@@ -694,8 +687,75 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 	})
 }
 
-func (s *Server) cacheKey(UUID string, block uint32) string {
+func newCacheKey(UUID string, block uint32) string {
 	return UUID + "#" + strconv.FormatUint(uint64(block), 16)
+}
+
+func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string, block uint32) {
+	var (
+		target = addr.String()
+		v      any
+		ok     bool
+	)
+	if v, ok = s.addrToPeer.Load(target); !ok {
+		return
+	}
+	var (
+		err      error
+		p        = v.(Peer)
+		cacheKey = newCacheKey(sender, block)
+		check    = Check{UUID: sender, Block: block}
+		pkt, _   = check.Marshal()
+		rck      = make(chan uint32)
+		last     = packets[len(packets)-1].Block
+		send     = func(packet Packet) {
+			if err = s.writePacket(addr, packet.Data); err != nil {
+				code := OpCode(binary.BigEndian.Uint16(packet.Data[:2]))
+				log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
+			}
+		}
+	)
+
+	s.rckCache.Store(cacheKey, rck)
+	defer s.rckCache.Delete(cacheKey)
+
+	for i := 0; i < len(packets); i++ {
+		send(packets[i])
+	}
+	for i := byte(0); i < s.Retries; i++ {
+		if err = s.writePacket(addr, pkt); err != nil {
+			log.Printf("check [%v] to [%v]-[%v] failed: %v", block, p.UUID, target, err)
+		}
+		timer := time.After(*p.RTO)
+		select {
+		case r := <-rck:
+			if r > last {
+				return
+			}
+			slices.DeleteFunc(packets, func(packet Packet) bool {
+				return packet.Block < r
+			})
+			if len(packets) == 0 {
+				return
+			}
+			if packets[0].Block == r {
+				send(packets[0])
+				i = 0
+			}
+		case <-timer:
+			log.Printf("[%v] check %v timeout", p.UUID, block)
+		}
+	}
+}
+
+func (s *Server) writePacket(addr net.Addr, pkt []byte) error {
+	if err := s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		return err
+	}
+	if _, err := s.conn.WriteTo(pkt, addr); err != nil {
+		return err
+	}
+	return nil
 }
 
 // dispatch may block by slow connection
@@ -714,29 +774,25 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 		start       time.Time
 		code        = OpCode(binary.BigEndian.Uint16(data[:2]))
 		ctx, cancel = context.WithCancel(context.Background())
-		cacheKey    = s.cacheKey(sender, block)
+		key         = newCacheKey(sender, block)
 	)
 
-	p.Store(cacheKey, cancel)
-	defer p.Delete(cacheKey)
+	p.Store(key, cancel)
+	defer p.Delete(key)
 	defer cancel()
 
 	for i := uint8(0); i < s.Retries; i++ {
 		if _, ok = s.addrToPeer.Load(target); !ok {
 			return
 		}
-		if err = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
-		}
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 			start = time.Now()
-			_, err = s.conn.WriteTo(data, addr)
+			err = s.writePacket(addr, data)
 		} else {
 			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
-			check := Check{UUID: sender, Block: block}
-			pkt, _ := check.Marshal()
-			_, err = s.conn.WriteTo(pkt, addr)
+			pkt, _ := new(Check{UUID: sender, Block: block}).Marshal()
+			err = s.writePacket(addr, pkt)
 		}
 		if err != nil {
 			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
@@ -753,6 +809,5 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 			*p.RTO = min(3*time.Second, *p.RTO*108/100+10*time.Millisecond)
 		}
 	}
-	_ = s.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT))
 	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)
 }

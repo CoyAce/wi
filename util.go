@@ -82,7 +82,7 @@ func Hash(ptr unsafe.Pointer) uint32 {
 	return uint32(uintptr(ptr))
 }
 
-// block sequence [1 2 3 5], return 3
+// block sequence [1 2 3 5], return index 3
 func findConsecutive(data []Data) int {
 	block := data[0].Block
 	var i = len(data)

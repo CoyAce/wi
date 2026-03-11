@@ -396,7 +396,7 @@ func TestUnknownUser(t *testing.T) {
 func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
-	time.Sleep(1 * time.Millisecond)
+	sender.SignIn()
 	_, err := server.parseAddrByUUID(sender.ID())
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +418,7 @@ func TestSyncName(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
 	sender := newClient(serverAddr, "sender")
-	time.Sleep(1 * time.Millisecond)
+	receiver.SignIn()
 	OldUUID := sender.ID()
 	sender.SetNickName("#")
 	sender.SignIn()
@@ -538,18 +538,13 @@ func TestCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(1 * time.Millisecond)
-	select {
-	case _ = <-receiver.SignedMessages:
-	default:
-		t.Error("expected signed message")
-	}
+	<-receiver.SignedMessages
 	v, ok := s.addrToPeer.Load(receiver.conn.LocalAddr().String())
 	if !ok {
 		t.Error("expected peer to load")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cacheKey := s.cacheKey(msg.UUID, msg.Block)
+	cacheKey := newCacheKey(msg.UUID, msg.Block)
 	p := v.(Peer)
 	p.Store(cacheKey, cancel)
 	defer p.Delete(cacheKey)
