@@ -345,6 +345,8 @@ func (cb *CircularBuffer) readNext() {
 }
 
 func (cb *CircularBuffer) Read(ranges []Range) []Packet {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
 	ret := make([]Packet, 0, len(ranges)*2)
 	for i := 0; i < cb.size; i++ {
 		idx := (cb.tail + i) % cb.capacity

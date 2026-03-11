@@ -2,6 +2,7 @@ package wi
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -521,6 +522,48 @@ func TestPull(t *testing.T) {
 	case _ = <-receiver.SignedMessages:
 		t.Errorf("duplicated message")
 	default:
+	}
+}
+
+func TestCheck(t *testing.T) {
+	msg := SignedMessage{SignReq: SignReq{1, SignBody{"default", "sender"}}, Payload: []byte(("hello beautiful world"))}
+	pkt, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, serverAddr := setUpServer(t)
+	receiver := newClient(serverAddr, "receiver")
+	receiver.SignIn()
+	_, err = s.conn.WriteTo(pkt, receiver.conn.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1 * time.Millisecond)
+	select {
+	case _ = <-receiver.SignedMessages:
+	default:
+		t.Error("expected signed message")
+	}
+	v, ok := s.addrToPeer.Load(receiver.conn.LocalAddr().String())
+	if !ok {
+		t.Error("expected peer to load")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cacheKey := s.cacheKey(msg.UUID, msg.Block)
+	p := v.(Peer)
+	p.Store(cacheKey, cancel)
+	defer p.Delete(cacheKey)
+	defer cancel()
+	check := Check{msg.Block, msg.UUID}
+	pkt, _ = check.Marshal()
+	_, err = s.conn.WriteTo(pkt, receiver.conn.LocalAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Millisecond):
+		t.Errorf("timeout")
 	}
 }
 

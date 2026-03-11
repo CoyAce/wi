@@ -734,7 +734,7 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 			_, err = s.conn.WriteTo(data, addr)
 		} else {
 			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
-			check := Check{UUID: p.UUID, Block: block}
+			check := Check{UUID: sender, Block: block}
 			pkt, _ := check.Marshal()
 			_, err = s.conn.WriteTo(pkt, addr)
 		}

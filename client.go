@@ -682,8 +682,7 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 	resp := make(chan DiscoveryResp, 150)
 	c.discoveries.Store(reqID, resp)
 	defer c.discoveries.Delete(reqID)
-	err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag})
-	if err != nil {
+	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
 		log.Printf("discovery failed: %v", err)
 	}
 	ret := make([]string, 0)
@@ -956,7 +955,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		cancel.(context.CancelFunc)()
 	case check.Unmarshal(buf) == nil:
 		if c.check(check.UUID, check.Block) {
-			c.ack(addr, check.UUID, msg.Block)
+			c.ack(addr, check.UUID, check.Block)
 		}
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.UUID, msg.Block)
