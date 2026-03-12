@@ -362,7 +362,6 @@ type messages struct {
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
-	history        sync.Map           // sign -> *sync.Map { uuid -> *RangeTracker }
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
@@ -370,7 +369,8 @@ type messages struct {
 }
 
 type tracker struct {
-	sync.Map // uuid -> *RangeTracker
+	sync.Map          // uuid -> *RangeTracker, track duplicate packets in user dimension
+	history  sync.Map // sign -> *sync.Map { uuid -> *RangeTracker }, track missing packets in sign and user dimension
 }
 
 func (t *tracker) loadTracker(UUID string) *RangeTracker {
@@ -385,13 +385,36 @@ func (t *tracker) check(UUID string, block uint32) bool {
 	return t.loadTracker(UUID).Contains(MonoRange(block))
 }
 
+func (t *tracker) loadHistorySet(sign string) *sync.Map {
+	if h, ok := t.history.Load(sign); ok {
+		return h.(*sync.Map)
+	}
+	h, _ := t.history.LoadOrStore(sign, new(sync.Map))
+	return h.(*sync.Map)
+}
+
+func (t *tracker) loadRangeTracker(sign *SignBody) *RangeTracker {
+	hs := t.loadHistorySet(sign.Sign)
+	if h, ok := hs.Load(sign.UUID); ok {
+		return h.(*RangeTracker)
+	}
+	h, _ := hs.LoadOrStore(sign.UUID, new(RangeTracker))
+	return h.(*RangeTracker)
+}
+
+// Track tracks packets in sign dimension
+func (t *tracker) Track(sign *SignBody, block uint32) {
+	t.loadRangeTracker(sign).Track(MonoRange(block))
+}
+
+// dup tracks packets in user dimension
 func (t *tracker) dup(UUID string, block uint32) bool {
-	tracker := t.loadTracker(UUID)
+	userTracker := t.loadTracker(UUID)
 	r := MonoRange(block)
-	if tracker.Contains(r) {
+	if userTracker.Contains(r) {
 		return true
 	}
-	tracker.Track(r)
+	userTracker.Track(r)
 	return false
 }
 
@@ -629,7 +652,7 @@ func (c *Client) send(req Req) error {
 	if err != nil {
 		return err
 	}
-	return c.write(pkt, req.ID(), true)
+	return c.write(pkt, req.ID())
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
@@ -689,7 +712,7 @@ func (c *Client) SendText(text string) error {
 	if err != nil {
 		return err
 	}
-	return c.write(pkt, msg.SignReq.Block, true)
+	return c.write(pkt, msg.SignReq.Block)
 }
 
 func (c *Client) SyncName(oldUUID string) {
@@ -699,7 +722,7 @@ func (c *Client) SyncName(oldUUID string) {
 		log.Printf("name req marshal failed, %v", err)
 		return
 	}
-	if err = c.write(pkt, nameReq.Block, true); err != nil {
+	if err = c.write(pkt, nameReq.Block); err != nil {
 		log.Printf("sync name: %v", err)
 	}
 }
@@ -707,10 +730,6 @@ func (c *Client) SyncName(oldUUID string) {
 func (c *Client) ReadIcon(target string) error {
 	// icon file id defaults to 0
 	return c.send(&ReadReq{Code: OpReadIcon, Block: c.nextID(), FileId: 0, Publisher: target, Subscriber: c.ID()})
-}
-
-func (c *Client) Track(sign *SignBody, block uint32) {
-	c.loadRangeTracker(sign).Track(MonoRange(block))
 }
 
 func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
@@ -842,23 +861,6 @@ func (c *Client) pullMessages(UUID string, tracker *RangeTracker) {
 	}
 }
 
-func (c *Client) loadHistorySet(sign string) *sync.Map {
-	if h, ok := c.history.Load(sign); ok {
-		return h.(*sync.Map)
-	}
-	h, _ := c.history.LoadOrStore(sign, new(sync.Map))
-	return h.(*sync.Map)
-}
-
-func (c *Client) loadRangeTracker(sign *SignBody) *RangeTracker {
-	hs := c.loadHistorySet(sign.Sign)
-	if h, ok := hs.Load(sign.UUID); ok {
-		return h.(*RangeTracker)
-	}
-	h, _ := hs.LoadOrStore(sign.UUID, new(RangeTracker))
-	return h.(*RangeTracker)
-}
-
 func (c *Client) ListenAndServe(addr string) {
 	c.localAddr = addr
 	if err := c.listen(); err != nil {
@@ -918,9 +920,12 @@ func (c *Client) SignIn() {
 	sign := SignReq{c.nextID(), SignBody{c.Sign, c.ID()}}
 	if pkt, err := sign.Marshal(); err != nil {
 		log.Printf("marshal sign request failed: %v", err)
-	} else if err = c.write(pkt, sign.Block, false); err != nil {
+	} else if err = c.write(pkt, sign.Block); err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
 	}
+}
+
+func (c *Client) retry() {
 	c.retryHandlers.Range(func(k, v interface{}) bool {
 		v.(context.CancelFunc)()
 		return true
@@ -1055,6 +1060,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
+			c.retry()
 		}
 	case ctrl.Unmarshal(buf) == nil:
 		c.ack(addr, ctrl.UUID, ctrl.Block)
@@ -1077,9 +1083,8 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	}
 }
 
-func (c *Client) dup(UUID string, block uint32) bool {
-	dup := c.tracker.dup(UUID, block)
-	if !dup && UUID != _SERVER {
+func (c *Client) dup(UUID string, block uint32) (dup bool) {
+	if dup = c.tracker.dup(UUID, block); !dup && UUID != _SERVER {
 		c.Track(&SignBody{Sign: c.Sign, UUID: UUID}, block)
 	}
 	return dup
@@ -1122,7 +1127,7 @@ func (c *Client) SetServerAddr(addr string) {
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) write(data []byte, block uint32, retryable bool) error {
+func (c *Client) write(data []byte, block uint32) error {
 	var (
 		ackCtx, ack     = context.WithCancel(context.Background())
 		retryCtx, retry = context.WithCancel(context.Background())
@@ -1136,10 +1141,8 @@ func (c *Client) write(data []byte, block uint32, retryable bool) error {
 	c.ackHandlers.Store(block, ack)
 	defer c.ackHandlers.Delete(block)
 
-	if retryable {
-		c.retryHandlers.Store(block, retry)
-		defer c.retryHandlers.Delete(block)
-	}
+	c.retryHandlers.Store(block, retry)
+	defer c.retryHandlers.Delete(block)
 
 	for i := uint8(0); i < c.Retries; i++ {
 		if i%2 == 0 {
