@@ -69,10 +69,10 @@ func (f *fileWriter) loop() {
 func (f *fileWriter) tryWrite(data Data) {
 	fd := f.files[data.FileId]
 	fd.counter++
-	req := fd.req
 	fd.data = append(fd.data, data)
 	fd.Track(MonoRange(data.Block))
-	if f.received256kb(fd) || fd.elapsed1Second() {
+	if f.received1MB(fd) || fd.elapsed1Second() {
+		req := fd.req
 		f.flush(fd, f.getPath(req.UUID, req.Filename))
 		fd.updateAndReset()
 	}
@@ -82,14 +82,8 @@ func (f *file) elapsed1Second() bool {
 	return time.Since(f.updateAt) >= 1*time.Second
 }
 
-func (f *file) noDataReceived() bool {
-	return f.counter == 0
-}
-
 func (f *file) updateAndReset() {
-	if f.updater != nil {
-		f.update()
-	}
+	f.update()
 	f.reset()
 }
 
@@ -99,6 +93,9 @@ func (f *file) reset() {
 }
 
 func (f *file) update() {
+	if f.updater == nil {
+		return
+	}
 	f.updater.update(f.GetProgress(), f.getSpeed())
 }
 
@@ -106,7 +103,6 @@ func (f *file) getSpeed() int {
 	var (
 		elapsed         time.Duration
 		packetsReceived int
-		speed           float32
 	)
 	if f.isCompleted() {
 		elapsed = time.Since(f.createAt) / time.Millisecond
@@ -115,12 +111,12 @@ func (f *file) getSpeed() int {
 		elapsed = time.Since(f.updateAt) / time.Millisecond
 		packetsReceived = f.counter
 	}
-	speed = float32(packetsReceived*BlockSize) * 1000 / float32(elapsed)
-	return int(speed)
+	// plus one to avoid divide by zero
+	return packetsReceived * BlockSize * 1000 / int(elapsed+1)
 }
 
-func (f *fileWriter) received256kb(fd *file) bool {
-	const size = 256 * 1024 / BlockSize
+func (f *fileWriter) received1MB(fd *file) bool {
+	const size = 1024 * 1024 / BlockSize
 	return len(fd.data) >= size
 }
 
@@ -140,13 +136,13 @@ func (f *fileWriter) init(req WriteReq) {
 }
 
 func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
-	rt := &RangeTracker{}
+	tracker := &RangeTracker{}
 	if size == 0 {
-		return rt
+		return tracker
 	}
 	finalBlock := (size + BlockSize - 1) / BlockSize
-	rt.Track(MonoRange(uint32(finalBlock + 1)))
-	return rt
+	tracker.Track(MonoRange(uint32(finalBlock + 1)))
+	return tracker
 }
 
 func (f *fileWriter) isProcessing(req WriteReq) bool {
@@ -193,8 +189,7 @@ func (f *fileWriter) clean(id uint32) {
 }
 
 func (f *fileWriter) isFile(fileId uint32) bool {
-	fd := f.files[fileId]
-	return fd != nil
+	return f.files[fileId] != nil
 }
 
 func (f *fileWriter) dup(fileId uint32, block uint32) bool {
@@ -208,6 +203,7 @@ func writeTo(filePath string, data []Data) {
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Printf("open file failed: %v", err)
+		return
 	}
 	defer f.Close()
 
@@ -215,13 +211,12 @@ func writeTo(filePath string, data []Data) {
 	for _, d := range data {
 		readers = append(readers, d.Payload)
 	}
-	multiReader := io.MultiReader(readers...)
-	_, err = f.Seek(int64((data[0].Block-1)*BlockSize), 0)
-	if err != nil {
+	// Block start at 1
+	if _, err = f.Seek(int64((data[0].Block-1)*BlockSize), 0); err != nil {
 		log.Printf("Seeking to block %d failed: %v", data[0].Block, err)
 	}
 	// 使用io.Copy将multiReader的内容写入文件
-	if _, err := io.Copy(f, multiReader); err != nil {
+	if _, err = io.Copy(f, io.MultiReader(readers...)); err != nil {
 		log.Printf("Write to file failed: %v", err)
 	}
 }
