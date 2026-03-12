@@ -16,10 +16,10 @@ import (
 )
 
 type Peer struct {
-	*SignBody                    // identity
-	*sync.Map                    // cache key -> CancelFunc
-	*RangeTracker                // block tracker
-	RTO           *time.Duration // retransmission timeout
+	*SignBody     // identity
+	*sync.Map     // cache key -> CancelFunc
+	*RangeTracker // block tracker
+	*reliableWriter
 }
 
 func (p Peer) ack(cacheKey string) {
@@ -46,8 +46,8 @@ type addrStore struct {
 	mu         sync.Mutex
 }
 
-func (s *addrStore) Set(sign *SignBody, addr net.Addr) {
-	p := s.updatePeer(sign, addr)
+func (s *addrStore) Set(sign *SignBody, addr net.Addr, conn net.PacketConn) {
+	p := s.updatePeer(sign, addr, conn)
 	// addr change, remove invalid addr
 	if a, ok := s.uuidToAddr.Load(sign.UUID); ok && a != addr.String() {
 		s.removeByUUID(sign.UUID)
@@ -78,18 +78,19 @@ func (s *addrStore) removeByAddr(addr string) {
 	}
 }
 
-func (s *addrStore) updatePeer(sign *SignBody, addr net.Addr) Peer {
-	p := Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), RTO: new(500 * time.Millisecond)}
+func (s *addrStore) updatePeer(sign *SignBody, addr net.Addr, conn net.PacketConn) Peer {
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		p = v.(Peer)
+		p := v.(Peer)
 		p.SignBody = sign
+		return p
 	}
-	return p
+	w := new(reliableWriter{RTO: RTO{minRTT: 3 * time.Second}, retries: 18, conn: conn})
+	w.rto.Store(int64(500 * time.Millisecond))
+	return Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), reliableWriter: w}
 }
 
 type Server struct {
 	Status    chan struct{} `json:"-"` // initialization status
-	Retries   uint8         // the number of times to retry a failed transmission
 	idToFiles sync.Map      // fileId -> wrq
 	idToSubs  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	history   sync.Map      // sign -> *sync.Map { uuid -> *history }
@@ -170,7 +171,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if s.dup(addr.String(), sign.Block) {
 			return
 		}
-		s.Set(&sign.SignBody, addr)
+		s.Set(&sign.SignBody, addr, s.conn)
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case OpSignOut:
 		s.removeByAddr(addr.String())
@@ -605,10 +606,6 @@ func (s *Server) addFile(wrq WriteReq) {
 }
 
 func (s *Server) init() {
-	if s.Retries == 0 {
-		s.Retries = 18
-	}
-
 	s.audioManager = &audioManager{}
 }
 
@@ -722,11 +719,12 @@ func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string,
 	for i := 0; i < len(packets); i++ {
 		send(packets[i])
 	}
-	for i := byte(0); i < s.Retries; i++ {
+	const retries = byte(18)
+	for i := byte(0); i < retries; i++ {
 		if err = s.writePacket(addr, pkt); err != nil {
 			log.Printf("check [%v] to [%v]-[%v] failed: %v", block, p.UUID, target, err)
 		}
-		timer := time.After(*p.RTO)
+		timer := time.After(time.Duration(p.rto.Load()))
 		select {
 		case r := <-rck:
 			if r > last {
@@ -762,52 +760,20 @@ func (s *Server) writePacket(addr net.Addr, pkt []byte) error {
 func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint32) {
 	var (
 		target = addr.String()
-		v      any
-		ok     bool
+		v, ok  = s.addrToPeer.Load(target)
 	)
-	if v, ok = s.addrToPeer.Load(target); !ok {
+	if !ok {
 		return
 	}
-	var (
-		err         error
-		p           = v.(Peer)
-		start       time.Time
-		code        = OpCode(binary.BigEndian.Uint16(data[:2]))
-		ctx, cancel = context.WithCancel(context.Background())
-		key         = newCacheKey(sender, block)
-	)
 
-	p.Store(key, cancel)
+	p, code, key := v.(Peer), OpCode(binary.BigEndian.Uint16(data[:2])), newCacheKey(sender, block)
+	ctx, ack := context.WithCancel(context.Background())
+	defer ack()
+	p.Store(key, ack)
 	defer p.Delete(key)
-	defer cancel()
 
-	for i := uint8(0); i < s.Retries; i++ {
-		if _, ok = s.addrToPeer.Load(target); !ok {
-			return
-		}
-		if i%2 == 0 {
-			log.Printf("[%v] send packet: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
-			start = time.Now()
-			err = s.writePacket(addr, data)
-		} else {
-			log.Printf("[%v] send check: %v to [%v]-[%v]", code.String(), block, p.UUID, target)
-			pkt, _ := new(Check{UUID: sender, Block: block}).Marshal()
-			err = s.writePacket(addr, pkt)
-		}
-		if err != nil {
-			log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
-		}
-		timer := time.After(*p.RTO)
-		log.Printf("[%v]-[%v] current timeout: %dms", p.UUID, target, *p.RTO/time.Millisecond)
-		select {
-		case <-ctx.Done():
-			RTT := time.Since(start)
-			*p.RTO = *p.RTO*8/10 + RTT*2/10
-			return
-		case <-timer:
-			log.Printf("[%v]-[%v] packet: %v timeout", code.String(), p.UUID, block)
-			*p.RTO = min(3*time.Second, *p.RTO*108/100+10*time.Millisecond)
-		}
+	log.Printf("[%v] dispatch packet %v to [%v]-[%v]", code.String(), block, p.UUID, target)
+	if err := p.reliableWrite(ctx, nil, addr, data, block); err != nil {
+		log.Printf("[%v]-[%v]-[%v] dispatch failed, %v", code.String(), p.UUID, target, err)
 	}
-	log.Printf("[%v]-[%v]-[%v] write timeout after %d retries", code.String(), p.UUID, target, s.Retries)
 }

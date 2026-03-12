@@ -2,10 +2,8 @@ package wi
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"math"
@@ -339,12 +337,10 @@ type Client struct {
 
 type Config struct {
 	ServerAddr     string
-	DataDir        string        // save config
-	ExternalDir    string        // save files, e.t. on Android should be /Android/data/...
-	ConfigName     string        `json:"-"`
-	MessageCounter uint32        // the number of sent messages
-	Retries        uint8         `json:"-"` // the number of times to retry a failed transmission
-	RTO            time.Duration `json:"-"` // retransmission timeout
+	DataDir        string // save config
+	ExternalDir    string // save files, e.t. on Android should be /Android/data/...
+	ConfigName     string `json:"-"`
+	MessageCounter uint32 // the number of sent messages
 }
 
 type Identity struct {
@@ -362,8 +358,6 @@ type messages struct {
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
-	ackHandlers    sync.Map           // block -> context.CancelFunc
-	retryHandlers  sync.Map           // block -> context.CancelFunc
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
 	checkCache     sync.Map           // cache key -> chan reqID
 }
@@ -429,51 +423,6 @@ func newMessages() messages {
 		SubMessages:    make(chan ReadReq, 20),
 		CtrlMessages:   make(chan CtrlReq, 10),
 	}
-}
-
-type connManager struct {
-	conn       net.PacketConn
-	remoteAddr net.Addr
-	localAddr  string
-	connFlag   int32 // 0: connected, 1: reconnecting
-}
-
-func (c *connManager) reconnect() {
-	if !atomic.CompareAndSwapInt32(&c.connFlag, 0, 1) {
-		log.Printf("reconnect already in progress, skipping")
-		return
-	}
-	defer atomic.StoreInt32(&c.connFlag, 0)
-	if c.conn != nil {
-		c.conn.Close()
-	}
-	if err := c.listen(); err != nil {
-		panic(err)
-	}
-	log.Printf("reconnected")
-}
-
-func (c *connManager) listen() error {
-	var err error
-	if c.conn, err = net.ListenPacket("udp", c.localAddr); err != nil {
-		log.Printf("[%s] listen failed: %v", c.localAddr, err)
-		return err
-	}
-	return nil
-}
-
-func (c *connManager) writeToServer(pkt []byte) error {
-	return c.writePacket(c.remoteAddr, pkt)
-}
-
-func (c *connManager) writePacket(addr net.Addr, pkt []byte) error {
-	if err := c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		return err
-	}
-	if _, err := c.conn.WriteTo(pkt, addr); err != nil {
-		return err
-	}
-	return nil
 }
 
 type fileManager struct {
@@ -648,11 +597,11 @@ func (c *Client) newAudioReq(code OpCode, fileId uint32) *WriteReq {
 }
 
 func (c *Client) send(req Req) error {
-	pkt, err := req.Marshal()
-	if err != nil {
+	if pkt, err := req.Marshal(); err != nil {
 		return err
+	} else {
+		return c.reliableWrite(pkt, req.ID())
 	}
-	return c.write(pkt, req.ID())
 }
 
 func (c *Client) PublishFile(name string, size uint64, id uint32) error {
@@ -712,7 +661,7 @@ func (c *Client) SendText(text string) error {
 	if err != nil {
 		return err
 	}
-	return c.write(pkt, msg.SignReq.Block)
+	return c.reliableWrite(pkt, msg.SignReq.Block)
 }
 
 func (c *Client) SyncName(oldUUID string) {
@@ -722,7 +671,7 @@ func (c *Client) SyncName(oldUUID string) {
 		log.Printf("name req marshal failed, %v", err)
 		return
 	}
-	if err = c.write(pkt, nameReq.Block); err != nil {
+	if err = c.reliableWrite(pkt, nameReq.Block); err != nil {
 		log.Printf("sync name: %v", err)
 	}
 }
@@ -876,7 +825,7 @@ func (c *Client) ListenAndServe(addr string) {
 
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", c.ServerAddr)
 	go func() {
-		// auto reconnect in case of server restart
+		// auto relisten in case of server restart
 		c.SendSign()
 		if c.Status != nil {
 			close(c.Status)
@@ -900,8 +849,10 @@ func (c *Client) pullTimeoutFiles() {
 }
 
 func (c *Client) init() {
-	c.Retries = 18
-	c.RTO = 500 * time.Millisecond
+	c.retries = 18
+	c.minRTT = 3 * time.Second
+	c.rto.Store(int64(500 * time.Millisecond))
+	c.blockManager = newBlockManager()
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
 	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.writeOnce, c.FileMessages)
@@ -920,16 +871,9 @@ func (c *Client) SignIn() {
 	sign := SignReq{c.nextID(), SignBody{c.Sign, c.ID()}}
 	if pkt, err := sign.Marshal(); err != nil {
 		log.Printf("marshal sign request failed: %v", err)
-	} else if err = c.write(pkt, sign.Block); err != nil {
+	} else if err = c.reliableWrite(pkt, sign.Block); err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
 	}
-}
-
-func (c *Client) retry() {
-	c.retryHandlers.Range(func(k, v interface{}) bool {
-		v.(context.CancelFunc)()
-		return true
-	})
 }
 
 func (c *Client) SignOut() {
@@ -978,11 +922,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	switch {
 	case ack.Unmarshal(buf) == nil:
 		log.Printf("ack received: %v", ack.Block)
-		cancel, ok := c.ackHandlers.Load(ack.Block)
-		if !ok {
-			return
-		}
-		cancel.(context.CancelFunc)()
+		c.complete(ack.Block)
 	case check.Unmarshal(buf) == nil:
 		if c.check(check.UUID, check.Block) {
 			c.ack(addr, check.UUID, check.Block)
@@ -1060,7 +1000,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
-			c.retry()
+			c.retryNow()
 		}
 	case ctrl.Unmarshal(buf) == nil:
 		c.ack(addr, ctrl.UUID, ctrl.Block)
@@ -1093,7 +1033,7 @@ func (c *Client) dup(UUID string, block uint32) (dup bool) {
 func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 	if pkt, err := new(Ack{Block: block, UUID: UUID}).Marshal(); err != nil {
 		log.Printf("ack marshal failed: %v", err)
-	} else if err = c.writePacket(addr, pkt); err != nil {
+	} else if err = c.writeTo(addr, pkt); err != nil {
 		log.Printf("[%s] ack failed: %v", addr, err)
 	}
 }
@@ -1101,7 +1041,7 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 func (c *Client) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
 	if pkt, err := new(Rck{Block: block, ReqID: reqID, UUID: UUID}).Marshal(); err != nil {
 		log.Printf("rck marshal failed: %v", err)
-	} else if err = c.writePacket(addr, pkt); err != nil {
+	} else if err = c.writeTo(addr, pkt); err != nil {
 		log.Printf("[%s] rck failed: %v", addr, err)
 	}
 }
@@ -1125,65 +1065,6 @@ func (c *Client) SetSign(sign string) {
 func (c *Client) SetServerAddr(addr string) {
 	c.ServerAddr = addr
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", addr)
-}
-
-func (c *Client) write(data []byte, block uint32) error {
-	var (
-		ackCtx, ack     = context.WithCancel(context.Background())
-		retryCtx, retry = context.WithCancel(context.Background())
-		start           time.Time
-		code            = OpCode(binary.BigEndian.Uint16(data[:2]))
-		err             error
-	)
-	defer ack()
-	defer retry()
-
-	c.ackHandlers.Store(block, ack)
-	defer c.ackHandlers.Delete(block)
-
-	c.retryHandlers.Store(block, retry)
-	defer c.retryHandlers.Delete(block)
-
-	for i := uint8(0); i < c.Retries; i++ {
-		if i%2 == 0 {
-			log.Printf("[%v] send packet: %v", code.String(), block)
-			start = time.Now()
-			err = c.writeToServer(data)
-		} else {
-			log.Printf("[%v] send check: %v", code.String(), block)
-			check := Check{Block: block}
-			pkt, _ := check.Marshal()
-			err = c.writeToServer(pkt)
-		}
-		if err != nil {
-			log.Printf("[%v] write failed: %v", code.String(), err)
-			if errors.Is(err, syscall.EPIPE) {
-				c.reconnect()
-			}
-			continue
-		}
-	WAIT:
-		timer := time.After(c.RTO)
-		log.Printf("current timeout: %dms", c.RTO/time.Millisecond)
-		select {
-		case <-ackCtx.Done():
-			RTT := time.Since(start)
-			c.RTO = c.RTO*8/10 + RTT*2/10
-			return nil
-		case <-timer:
-			log.Printf("[%v] packet: %v timeout", code.String(), block)
-			c.RTO = min(3*time.Second, c.RTO*108/100+10*time.Millisecond)
-		case <-retryCtx.Done():
-			log.Printf("retry")
-			retryCtx, retry = context.WithCancel(context.Background())
-			c.retryHandlers.Store(block, retry)
-			if err = c.writeToServer(data); err != nil {
-				log.Printf("[%v] write failed: %v", code.String(), err)
-			}
-			goto WAIT
-		}
-	}
-	return errors.New(fmt.Sprintf("[%v] exhausted retries", code.String()))
 }
 
 var DefaultClient *Client
