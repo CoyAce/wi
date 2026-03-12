@@ -331,6 +331,7 @@ type Client struct {
 	Identity
 	Config
 	messages
+	tracker // tracker track all received packets
 	connManager
 	fileManager
 	*audioManager
@@ -338,10 +339,12 @@ type Client struct {
 
 type Config struct {
 	ServerAddr     string
-	DataDir        string // save config
-	ExternalDir    string // save files, e.t. on Android should be /Android/data/...
-	ConfigName     string `json:"-"`
-	MessageCounter uint32 // the number of sent messages
+	DataDir        string        // save config
+	ExternalDir    string        // save files, e.t. on Android should be /Android/data/...
+	ConfigName     string        `json:"-"`
+	MessageCounter uint32        // the number of sent messages
+	Retries        uint8         `json:"-"` // the number of times to retry a failed transmission
+	RTO            time.Duration `json:"-"` // retransmission timeout
 }
 
 type Identity struct {
@@ -359,12 +362,9 @@ type messages struct {
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
-	Retries        uint8              `json:"-"` // the number of times to retry a failed transmission
-	RTO            time.Duration      `json:"-"` // retransmission timeout
 	history        sync.Map           // sign -> *sync.Map { uuid -> *RangeTracker }
 	ackHandlers    sync.Map           // block -> context.CancelFunc
 	retryHandlers  sync.Map           // block -> context.CancelFunc
-	tracker        tracker            // tracker track all received packets
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
 	checkCache     sync.Map           // cache key -> chan reqID
 }
@@ -401,8 +401,6 @@ func (c *Client) nextID() uint32 {
 
 func newMessages() messages {
 	return messages{
-		Retries:        18,
-		RTO:            500 * time.Millisecond,
 		SignedMessages: make(chan SignedMessage, 100),
 		FileMessages:   make(chan WriteReq, 20),
 		SubMessages:    make(chan ReadReq, 20),
@@ -415,6 +413,44 @@ type connManager struct {
 	remoteAddr net.Addr
 	localAddr  string
 	connFlag   int32 // 0: connected, 1: reconnecting
+}
+
+func (c *connManager) reconnect() {
+	if !atomic.CompareAndSwapInt32(&c.connFlag, 0, 1) {
+		log.Printf("reconnect already in progress, skipping")
+		return
+	}
+	defer atomic.StoreInt32(&c.connFlag, 0)
+	if c.conn != nil {
+		c.conn.Close()
+	}
+	if err := c.listen(); err != nil {
+		panic(err)
+	}
+	log.Printf("reconnected")
+}
+
+func (c *connManager) listen() error {
+	var err error
+	if c.conn, err = net.ListenPacket("udp", c.localAddr); err != nil {
+		log.Printf("[%s] listen failed: %v", c.localAddr, err)
+		return err
+	}
+	return nil
+}
+
+func (c *connManager) writeToServer(pkt []byte) error {
+	return c.writePacket(c.remoteAddr, pkt)
+}
+
+func (c *connManager) writePacket(addr net.Addr, pkt []byte) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
+		return err
+	}
+	if _, err := c.conn.WriteTo(pkt, addr); err != nil {
+		return err
+	}
+	return nil
 }
 
 type fileManager struct {
@@ -562,13 +598,7 @@ func (c *Client) SendAudioPacket(fileId uint32, blockId uint32, packet []byte) e
 	if err != nil {
 		return err
 	}
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		return err
-	}
-	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
-		return err
-	}
-	return nil
+	return c.writeToServer(pkt)
 }
 
 func (c *Client) MakeAudioCall(fileId uint32) error {
@@ -646,17 +676,11 @@ func (c *Client) opReady(id uint32) error {
 }
 
 func (c *Client) writeOnce(data Data) error {
-	pkt, err := data.Marshal()
-	if err != nil {
+	if pkt, err := data.Marshal(); err != nil {
 		return err
+	} else {
+		return c.writeToServer(pkt)
 	}
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		return err
-	}
-	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (c *Client) SendText(text string) error {
@@ -874,6 +898,8 @@ func (c *Client) pullTimeoutFiles() {
 }
 
 func (c *Client) init() {
+	c.Retries = 18
+	c.RTO = 500 * time.Millisecond
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
 	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.writeOnce, c.FileMessages)
@@ -881,72 +907,32 @@ func (c *Client) init() {
 
 // SendSign try to write sign to server
 func (c *Client) SendSign() {
-	sign := SignReq{0, SignBody{c.Sign, c.ID()}}
-	pkt, err := sign.Marshal()
-	if err != nil {
+	if pkt, err := new(SignReq{0, SignBody{c.Sign, c.ID()}}).Marshal(); err != nil {
 		log.Printf("[%s] marshal failed: %v", c.Sign, err)
-	}
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-	}
-	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
+	} else if err = c.writeToServer(pkt); err != nil {
 		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
 	}
 }
 
 func (c *Client) SignIn() {
 	sign := SignReq{c.nextID(), SignBody{c.Sign, c.ID()}}
-	pkt, err := sign.Marshal()
-	if err != nil {
-		panic(err)
-	}
-	err = c.write(pkt, sign.Block, false)
-	if err != nil {
+	if pkt, err := sign.Marshal(); err != nil {
+		log.Printf("marshal sign request failed: %v", err)
+	} else if err = c.write(pkt, sign.Block, false); err != nil {
 		log.Printf("[%s] send failed: %v", c.Sign, err)
-	} else {
-		c.retryHandlers.Range(func(k, v interface{}) bool {
-			v.(context.CancelFunc)()
-			return true
-		})
 	}
+	c.retryHandlers.Range(func(k, v interface{}) bool {
+		v.(context.CancelFunc)()
+		return true
+	})
 }
 
 func (c *Client) SignOut() {
-	op := OpSignOut
-	pkt, err := op.Marshal()
-	if err != nil {
+	if pkt, err := new(OpSignOut).Marshal(); err != nil {
 		log.Printf("marshal failed: %v", err)
+	} else if err = c.writeToServer(pkt); err != nil {
+		log.Printf("[%s] sign out failed: %v", c.ServerAddr, err)
 	}
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-	}
-	if _, err = c.conn.WriteTo(pkt, c.remoteAddr); err != nil {
-		log.Printf("[%s] write failed: %v", c.ServerAddr, err)
-	}
-}
-
-func (c *Client) reconnect() {
-	if !atomic.CompareAndSwapInt32(&c.connFlag, 0, 1) {
-		log.Printf("reconnect already in progress, skipping")
-		return
-	}
-	defer atomic.StoreInt32(&c.connFlag, 0)
-	if c.conn != nil {
-		c.conn.Close()
-	}
-	if err := c.listen(); err != nil {
-		panic(err)
-	}
-	log.Printf("reconnected")
-}
-
-func (c *Client) listen() error {
-	var err error
-	if c.conn, err = net.ListenPacket("udp", c.localAddr); err != nil {
-		log.Printf("[%s] listen failed: %v", c.localAddr, err)
-		return err
-	}
-	return nil
 }
 
 func (c *Client) serve() {
@@ -993,7 +979,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 		cancel.(context.CancelFunc)()
 	case check.Unmarshal(buf) == nil:
-		if c.tracker.check(check.UUID, check.Block) {
+		if c.check(check.UUID, check.Block) {
 			c.ack(addr, check.UUID, check.Block)
 		} else if v, ok := c.checkCache.Load(newCacheKey(check.UUID, check.Block)); ok {
 			v.(chan struct{}) <- struct{}{}
@@ -1100,23 +1086,17 @@ func (c *Client) dup(UUID string, block uint32) bool {
 }
 
 func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
-	ack := Ack{Block: block, UUID: UUID}
-	pkt, err := ack.Marshal()
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		log.Printf("[%s] ack failed: %v", addr, err)
-	}
-	if _, err = c.conn.WriteTo(pkt, addr); err != nil {
+	if pkt, err := new(Ack{Block: block, UUID: UUID}).Marshal(); err != nil {
+		log.Printf("ack marshal failed: %v", err)
+	} else if err = c.writePacket(addr, pkt); err != nil {
 		log.Printf("[%s] ack failed: %v", addr, err)
 	}
 }
 
 func (c *Client) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
-	rck := Rck{Block: block, ReqID: reqID, UUID: UUID}
-	pkt, err := rck.Marshal()
-	if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-		log.Printf("[%s] rck failed: %v", addr, err)
-	}
-	if _, err = c.conn.WriteTo(pkt, addr); err != nil {
+	if pkt, err := new(Rck{Block: block, ReqID: reqID, UUID: UUID}).Marshal(); err != nil {
+		log.Printf("rck marshal failed: %v", err)
+	} else if err = c.writePacket(addr, pkt); err != nil {
 		log.Printf("[%s] rck failed: %v", addr, err)
 	}
 }
@@ -1142,12 +1122,12 @@ func (c *Client) SetServerAddr(addr string) {
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
+func (c *Client) write(data []byte, block uint32, retryable bool) error {
 	var (
 		ackCtx, ack     = context.WithCancel(context.Background())
 		retryCtx, retry = context.WithCancel(context.Background())
 		start           time.Time
-		code            = OpCode(binary.BigEndian.Uint16(bytes[:2]))
+		code            = OpCode(binary.BigEndian.Uint16(data[:2]))
 		err             error
 	)
 	defer ack()
@@ -1162,18 +1142,15 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 	}
 
 	for i := uint8(0); i < c.Retries; i++ {
-		if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-			log.Printf("[%v] write failed: %v", code.String(), err)
-		}
 		if i%2 == 0 {
 			log.Printf("[%v] send packet: %v", code.String(), block)
 			start = time.Now()
-			_, err = c.conn.WriteTo(bytes, c.remoteAddr)
+			err = c.writeToServer(data)
 		} else {
 			log.Printf("[%v] send check: %v", code.String(), block)
 			check := Check{Block: block}
 			pkt, _ := check.Marshal()
-			_, err = c.conn.WriteTo(pkt, c.remoteAddr)
+			err = c.writeToServer(pkt)
 		}
 		if err != nil {
 			log.Printf("[%v] write failed: %v", code.String(), err)
@@ -1197,10 +1174,7 @@ func (c *Client) write(bytes []byte, block uint32, retryable bool) error {
 			log.Printf("retry")
 			retryCtx, retry = context.WithCancel(context.Background())
 			c.retryHandlers.Store(block, retry)
-			if err = c.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
-				log.Printf("[%v] write failed: %v", code.String(), err)
-			}
-			if _, err = c.conn.WriteTo(bytes, c.remoteAddr); err != nil {
+			if err = c.writeToServer(data); err != nil {
 				log.Printf("[%v] write failed: %v", code.String(), err)
 			}
 			goto WAIT
