@@ -304,9 +304,7 @@ func (f *fileReader) read(id uint32) {
 	}
 	defer content.Close()
 LOOP:
-	reading := make([]Range, len(c.reading.ranges))
-	copy(reading, c.reading.ranges)
-	for _, rg := range reading {
+	for _, rg := range c.reading.Get() {
 		pos := (rg.start - 1) * BlockSize
 		if _, err = content.Seek(int64(pos), 0); err != nil {
 			log.Printf("Seek failed: %v", err)
@@ -315,9 +313,6 @@ LOOP:
 			d := Data{FileId: c.fileId, Block: i - 1, Payload: content}
 			if err = f.writeOnce(d); err != nil {
 				log.Printf("Send failed: %v", err)
-			}
-			if i%50 == 0 {
-				c.remove(Range{rg.start, i})
 			}
 		}
 		c.remove(rg)
@@ -329,10 +324,6 @@ LOOP:
 	if err = f.opReady(id); err != nil {
 		log.Printf("Ready failed: %v", err)
 	}
-}
-
-func (f *fileReader) isPull(fileId uint32) bool {
-	return f.contents[fileId] != nil
 }
 
 type Client struct {
