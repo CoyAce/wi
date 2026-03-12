@@ -425,3 +425,12 @@ func partition(ranges []Range, maxLen int) [][]Range {
 	}
 	return ret
 }
+
+type CacheKey struct {
+	UUID  string
+	Block uint32
+}
+
+func newCacheKey(UUID string, block uint32) CacheKey {
+	return CacheKey{UUID: UUID, Block: block}
+}

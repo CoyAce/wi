@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,12 +16,12 @@ import (
 
 type Peer struct {
 	*SignBody     // identity
-	*sync.Map     // cache key -> CancelFunc
+	*sync.Map     // CacheKey -> CancelFunc
 	*RangeTracker // block tracker
 	*reliableWriter
 }
 
-func (p Peer) ack(cacheKey string) {
+func (p Peer) ack(cacheKey CacheKey) {
 	cancel, ok := p.Load(cacheKey)
 	if !ok {
 		return
@@ -682,10 +681,6 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 		}
 		return true
 	})
-}
-
-func newCacheKey(UUID string, block uint32) string {
-	return UUID + "#" + strconv.FormatUint(uint64(block), 16)
 }
 
 func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string, block uint32) {

@@ -359,7 +359,7 @@ type messages struct {
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
-	checkCache     sync.Map           // cache key -> chan reqID
+	checkCache     sync.Map           // CacheKey -> chan reqID
 }
 
 type tracker struct {
