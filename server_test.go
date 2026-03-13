@@ -546,8 +546,8 @@ func TestCheck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cacheKey := newCacheKey(msg.UUID, msg.Block)
 	p := v.(Peer)
-	p.Store(cacheKey, cancel)
-	defer p.Delete(cacheKey)
+	p.putACK(cacheKey, cancel)
+	defer p.deleteRCK(cacheKey)
 	defer cancel()
 	check := Check{msg.Block, msg.UUID}
 	pkt, _ = check.Marshal()

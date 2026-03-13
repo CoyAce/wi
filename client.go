@@ -359,7 +359,6 @@ type messages struct {
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
-	finCache       sync.Map           // CacheKey -> chan block
 }
 
 type tracker struct {
@@ -688,8 +687,8 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 	defer c.discoveries.Delete(reqID)
 	fin := make(chan uint32, 1)
 	key := newCacheKey(c.ID(), reqID)
-	c.finCache.Store(key, fin)
-	defer c.finCache.Delete(key)
+	c.putFIN(key, fin)
+	defer c.deleteFIN(key)
 
 	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
 		log.Printf("discovery failed: %v", err)
@@ -916,7 +915,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	switch {
 	case ack.Unmarshal(buf) == nil:
 		log.Printf("ack received: %v", ack.Block)
-		c.complete(ack.Block)
+		c.complete(newBlockKey(ack.Block))
 	case check.Unmarshal(buf) == nil:
 		if c.check(check.UUID, check.Block) {
 			c.ack(addr, check.UUID, check.Block)
@@ -990,9 +989,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		log.Printf("nck received, [%v]-[%v]", nck.UUID, nck.Block)
 		c.req <- nck
 	case fin.Unmarshal(buf) == nil:
-		if v, ok := c.finCache.Load(newCacheKey(fin.UUID, fin.ReqID)); ok {
-			v.(chan uint32) <- fin.Block
-		}
+		c.finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()

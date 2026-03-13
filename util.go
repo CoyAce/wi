@@ -434,3 +434,7 @@ type CacheKey struct {
 func newCacheKey(UUID string, block uint32) CacheKey {
 	return CacheKey{UUID: UUID, Block: block}
 }
+
+func newBlockKey(block uint32) CacheKey {
+	return CacheKey{Block: block}
+}

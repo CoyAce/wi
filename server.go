@@ -15,17 +15,8 @@ import (
 
 type Peer struct {
 	*SignBody     // identity
-	*sync.Map     // CacheKey -> CancelFunc
 	*RangeTracker // block tracker
 	*reliableWriter
-}
-
-func (p Peer) ack(cacheKey CacheKey) {
-	cancel, ok := p.Load(cacheKey)
-	if !ok {
-		return
-	}
-	cancel.(context.CancelFunc)()
 }
 
 type history struct {
@@ -82,9 +73,9 @@ func (s *addrStore) updatePeer(sign *SignBody, addr net.Addr, conn net.PacketCon
 		p.SignBody = sign
 		return p
 	}
-	w := new(reliableWriter{RTO: RTO{minRTT: 3 * time.Second}, retries: 18, conn: conn})
+	w := new(reliableWriter{RTO: RTO{minRTT: 3 * time.Second}, retries: 18, conn: conn, blockManager: newBlockManager()})
 	w.rto.Store(int64(500 * time.Millisecond))
-	return Peer{SignBody: sign, Map: new(sync.Map), RangeTracker: new(RangeTracker), reliableWriter: w}
+	return Peer{SignBody: sign, RangeTracker: new(RangeTracker), reliableWriter: w}
 }
 
 type Server struct {
@@ -92,7 +83,6 @@ type Server struct {
 	idToFiles sync.Map      // fileId -> wrq
 	idToSubs  sync.Map      // published files, FilePair -> *sync.Map { subscriber -> ReadReq }
 	history   sync.Map      // sign -> *sync.Map { uuid -> *history }
-	rckCache  sync.Map      // cache key -> rck
 	addrStore
 	*audioManager
 	counter uint32
@@ -180,7 +170,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		log.Printf("[%v], ack received: %v", addr.String(), ack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).ack(newCacheKey(ack.UUID, ack.Block))
+			p.(Peer).complete(newCacheKey(ack.UUID, ack.Block))
 		}
 	case OpCheck:
 		var block uint32
@@ -270,8 +260,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		log.Printf("rck received: %v", rck)
-		if c, ok := s.rckCache.Load(newCacheKey(rck.UUID, rck.ReqID)); ok {
-			c.(chan uint32) <- rck.Block
+		if p, ok := s.addrToPeer.Load(addr.String()); ok {
+			p.(Peer).patch(newCacheKey(rck.UUID, rck.ReqID), rck.Block)
 		}
 	default:
 		var (
@@ -679,22 +669,9 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 }
 
 func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string, block uint32) {
-	var (
-		v, ok = s.addrToPeer.Load(addr.String())
-	)
-	if !ok {
-		return
+	if v, ok := s.addrToPeer.Load(addr.String()); ok {
+		v.(Peer).reliableMultiWrite(addr, packets, sender, block)
 	}
-	var (
-		p        = v.(Peer)
-		cacheKey = newCacheKey(sender, block)
-		rck      = make(chan uint32)
-	)
-
-	s.rckCache.Store(cacheKey, rck)
-	defer s.rckCache.Delete(cacheKey)
-
-	p.reliableMultiWrite(rck, addr, packets, sender, block)
 }
 
 func (s *Server) writePacket(addr net.Addr, pkt []byte) error {
@@ -720,8 +697,8 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 	p, code, key := v.(Peer), OpCode(binary.BigEndian.Uint16(data[:2])), newCacheKey(sender, block)
 	ctx, ack := context.WithCancel(context.Background())
 	defer ack()
-	p.Store(key, ack)
-	defer p.Delete(key)
+	p.putACK(key, ack)
+	defer p.deleteACK(key)
 
 	log.Printf("[%v] dispatch packet %v to [%v]-[%v]", code.String(), block, p.UUID, target)
 	if err := p.reliableWrite(ctx, nil, addr, data, block); err != nil {
