@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -204,4 +205,44 @@ func (w *reliableWriter) listen() error {
 		return err
 	}
 	return nil
+}
+
+func (w *reliableWriter) reliableMultiWrite(rck chan uint32, addr net.Addr, packets []Packet, sender string, block uint32) {
+	var (
+		finPkt, _ = new(Fin{UUID: sender, ReqID: block, Block: uint32(len(packets))}).Marshal()
+		last      = packets[len(packets)-1].Block
+		send      = func(packet Packet) {
+			if err := w.writeTo(addr, packet.Data); err != nil {
+				code := new(OpCode(binary.BigEndian.Uint16(packet.Data[:2]))).String()
+				log.Printf("[%v] write [%v] to [%v] failed: %v", code, block, addr.String(), err)
+			}
+		}
+	)
+	for i := 0; i < len(packets); i++ {
+		send(packets[i])
+	}
+	for attempt := byte(0); attempt < w.retries; attempt++ {
+		if err := w.writeTo(addr, finPkt); err != nil {
+			log.Printf("write fin [%v] to [%v] failed: %v", block, addr.String(), err)
+		}
+		timer := time.After(time.Duration(w.rto.Load()))
+		select {
+		case r := <-rck:
+			if r > last {
+				return
+			}
+			slices.DeleteFunc(packets, func(packet Packet) bool {
+				return packet.Block < r
+			})
+			if len(packets) == 0 {
+				return
+			}
+			if packets[0].Block == r {
+				send(packets[0])
+				attempt = 0
+			}
+		case <-timer:
+			log.Printf("fin %v timeout", block)
+		}
+	}
 }

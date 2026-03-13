@@ -8,7 +8,6 @@ import (
 	"log"
 	"math"
 	"net"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -372,29 +371,25 @@ func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 		}
 		packets = append(packets, Packet{Block: uint32(i + 1), Data: v})
 	}
-	v, ok := s.addrToPeer.Load(addr.String())
-	if !ok {
-		return
+
+	if v, ok := s.addrToPeer.Load(addr.String()); ok {
+		s.dispatchInOrder(addr, packets, v.(Peer).UUID, drq.Block)
 	}
-	s.dispatchInOrder(addr, packets, v.(Peer).UUID, drq.Block)
 }
 
 func (s *Server) toDiscoveryResp(users []string, reqID uint32) []DiscoveryResp {
 	const maxSize = DatagramSize - 12
 	ret := make([]DiscoveryResp, 0, 20)
-	prev, size := 0, 0
-	index := uint32(1)
+	prev, size, index := 0, 0, uint32(1)
 	for i := 0; i < len(users); i++ {
 		n := 1 + len(users[i])
 		if size+n > maxSize {
-			ret = append(ret, DiscoveryResp{Block: index, ReqID: reqID, Final: 0, UUIDS: users[prev:i]})
-			index++
-			prev = i
-			size = 0
+			ret = append(ret, DiscoveryResp{Block: index, ReqID: reqID, UUIDS: users[prev:i]})
+			prev, size, index = i, 0, index+1
 		}
 		size += n
 	}
-	return append(ret, DiscoveryResp{Block: index, ReqID: reqID, Final: 1, UUIDS: users[prev:]})
+	return append(ret, DiscoveryResp{Block: index, ReqID: reqID, UUIDS: users[prev:]})
 }
 
 func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
@@ -685,60 +680,21 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 
 func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string, block uint32) {
 	var (
-		target = addr.String()
-		v      any
-		ok     bool
+		v, ok = s.addrToPeer.Load(addr.String())
 	)
-	if v, ok = s.addrToPeer.Load(target); !ok {
+	if !ok {
 		return
 	}
 	var (
-		err      error
 		p        = v.(Peer)
 		cacheKey = newCacheKey(sender, block)
-		check    = Check{UUID: sender, Block: block}
-		pkt, _   = check.Marshal()
 		rck      = make(chan uint32)
-		last     = packets[len(packets)-1].Block
-		send     = func(packet Packet) {
-			if err = s.writePacket(addr, packet.Data); err != nil {
-				code := OpCode(binary.BigEndian.Uint16(packet.Data[:2]))
-				log.Printf("[%v] write [%v] to [%v]-[%v]failed: %v", code.String(), block, p.UUID, target, err)
-			}
-		}
 	)
 
 	s.rckCache.Store(cacheKey, rck)
 	defer s.rckCache.Delete(cacheKey)
 
-	for i := 0; i < len(packets); i++ {
-		send(packets[i])
-	}
-	const retries = byte(18)
-	for i := byte(0); i < retries; i++ {
-		if err = s.writePacket(addr, pkt); err != nil {
-			log.Printf("check [%v] to [%v]-[%v] failed: %v", block, p.UUID, target, err)
-		}
-		timer := time.After(time.Duration(p.rto.Load()))
-		select {
-		case r := <-rck:
-			if r > last {
-				return
-			}
-			slices.DeleteFunc(packets, func(packet Packet) bool {
-				return packet.Block < r
-			})
-			if len(packets) == 0 {
-				return
-			}
-			if packets[0].Block == r {
-				send(packets[0])
-				i = 0
-			}
-		case <-timer:
-			log.Printf("[%v] check %v timeout", p.UUID, block)
-		}
-	}
+	p.reliableMultiWrite(rck, addr, packets, sender, block)
 }
 
 func (s *Server) writePacket(addr net.Addr, pkt []byte) error {

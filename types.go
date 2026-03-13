@@ -44,6 +44,7 @@ const (
 	OpDiscovery
 	OpDiscoveryResp
 	OpRck
+	OpFin
 )
 
 var wrqSet = map[OpCode]bool{
@@ -127,6 +128,8 @@ func (op *OpCode) String() string {
 		return "DiscoveryResp"
 	case OpRck:
 		return "Rck"
+	case OpFin:
+		return "Fin"
 	}
 	return "unknown"
 }
@@ -615,6 +618,71 @@ func (n *CtrlReq) Unmarshal(p []byte) error {
 	}
 
 	n.UUID, err = readString(r) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
+}
+
+type Fin struct {
+	Block uint32
+	ReqID uint32
+	UUID  string
+}
+
+func (s *Fin) Marshal() ([]byte, error) {
+	size := 2 + 4 + 4 + len(s.UUID) + 1
+	b := new(bytes.Buffer)
+	b.Grow(size)
+
+	err := binary.Write(b, binary.BigEndian, uint16(OpFin)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, s.Block) // write block number
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, s.ReqID) // write req id
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, s.UUID) // write uuid
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func (s *Fin) Unmarshal(p []byte) error {
+	var code OpCode
+	b := bytes.NewBuffer(p)
+
+	err := binary.Read(b, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpFin {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &s.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &s.ReqID) // read req id
+	if err != nil {
+		return InvalidData
+	}
+
+	s.UUID, err = readString(b) // read uuid
 	if err != nil {
 		return InvalidData
 	}
@@ -1237,7 +1305,6 @@ func (d *DiscoveryReq) Unmarshal(p []byte) error {
 type DiscoveryResp struct {
 	Block uint32
 	ReqID uint32
-	Final byte
 	UUIDS []string
 }
 
@@ -1246,7 +1313,7 @@ func (d *DiscoveryResp) ID() uint32 {
 }
 
 func (d *DiscoveryResp) Marshal() ([]byte, error) {
-	size := 2 + 4 + 4 + 1 + 1
+	size := 2 + 4 + 4 + 1
 	for _, u := range d.UUIDS {
 		size += 1 + len(u)
 	}
@@ -1271,14 +1338,12 @@ func (d *DiscoveryResp) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = b.WriteByte(d.Final) // write final mark
+	err = b.WriteByte(byte(len(d.UUIDS))) // write uuid count
 	if err != nil {
 		return nil, err
 	}
 
-	err = b.WriteByte(byte(len(d.UUIDS)))
-
-	for _, u := range d.UUIDS {
+	for _, u := range d.UUIDS { // write uuids
 		err = writeString(b, u)
 		if err != nil {
 			return nil, err
@@ -1315,17 +1380,12 @@ func (d *DiscoveryResp) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	d.Final, err = r.ReadByte() // read final flag
+	l, err = r.ReadByte() // read uuid count
 	if err != nil {
 		return InvalidData
 	}
 
-	l, err = r.ReadByte() // read uuid cnt
-	if err != nil {
-		return InvalidData
-	}
-
-	d.UUIDS = make([]string, 0, l)
+	d.UUIDS = make([]string, 0, l) // read uuids
 	for i := byte(0); i < l; i++ {
 		s, err = readString(r)
 		if err != nil {

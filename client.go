@@ -359,7 +359,7 @@ type messages struct {
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
 	discoveries    sync.Map           // reqID -> chan DiscoveryResp
-	checkCache     sync.Map           // CacheKey -> chan reqID
+	finCache       sync.Map           // CacheKey -> chan block
 }
 
 type tracker struct {
@@ -686,17 +686,16 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 	resp := make(chan DiscoveryResp, 150)
 	c.discoveries.Store(reqID, resp)
 	defer c.discoveries.Delete(reqID)
-	check := make(chan struct{}, 1)
+	fin := make(chan uint32, 1)
 	key := newCacheKey(c.ID(), reqID)
-	c.checkCache.Store(key, check)
-	defer c.checkCache.Delete(key)
+	c.finCache.Store(key, fin)
+	defer c.finCache.Delete(key)
 
 	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
 		log.Printf("discovery failed: %v", err)
 	}
 	rt := new(RangeTracker)
 	ret := make([]string, 0)
-	final := false
 LOOP:
 	for {
 		timer := time.After(10 * time.Second)
@@ -708,22 +707,16 @@ LOOP:
 			}
 			ret = append(ret, d.UUIDS...)
 			rt.Track(r)
-			if d.Final == 1 {
-				final = true
-				if rt.isCompleted() {
-					c.rck(c.remoteAddr, c.ID(), rt.nextBlock(), reqID)
-					break LOOP
-				}
-			}
-		case <-check:
+		case finBlock := <-fin:
+			rt.Track(MonoRange(finBlock + 1))
 			var next uint32
 			if rt.isCompleted() {
-				next = rt.nextBlock()
+				next = finBlock
 			} else {
 				next = rt.Get()[0].start
 			}
 			c.rck(c.remoteAddr, c.ID(), next, reqID)
-			if final && rt.isCompleted() {
+			if rt.isCompleted() {
 				break LOOP
 			}
 		case <-timer:
@@ -909,6 +902,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
 		ack       Ack
 		nck       Nck
+		fin       Fin
 		msg       SignedMessage
 		data      Data
 		ec        ErrCode
@@ -926,8 +920,6 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case check.Unmarshal(buf) == nil:
 		if c.check(check.UUID, check.Block) {
 			c.ack(addr, check.UUID, check.Block)
-		} else if v, ok := c.checkCache.Load(newCacheKey(check.UUID, check.Block)); ok {
-			v.(chan struct{}) <- struct{}{}
 		}
 	case msg.Unmarshal(buf) == nil:
 		c.ack(addr, msg.UUID, msg.Block)
@@ -997,6 +989,10 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 		log.Printf("nck received, [%v]-[%v]", nck.UUID, nck.Block)
 		c.req <- nck
+	case fin.Unmarshal(buf) == nil:
+		if v, ok := c.finCache.Load(newCacheKey(fin.UUID, fin.ReqID)); ok {
+			v.(chan uint32) <- fin.Block
+		}
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
