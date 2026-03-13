@@ -178,7 +178,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if ack.Unmarshal(pkt) != nil {
 			return
 		}
-		log.Printf("ack received: %v", ack)
+		log.Printf("[%v], ack received: %v", addr.String(), ack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).ack(newCacheKey(ack.UUID, ack.Block))
 		}

@@ -209,7 +209,7 @@ func (w *reliableWriter) listen() error {
 
 func (w *reliableWriter) reliableMultiWrite(rck chan uint32, addr net.Addr, packets []Packet, sender string, block uint32) {
 	var (
-		finPkt, _ = new(Fin{UUID: sender, ReqID: block, Block: uint32(len(packets))}).Marshal()
+		finPkt, _ = new(Fin{ReqHeader{UUID: sender, ReqID: block, Block: uint32(len(packets))}}).Marshal()
 		last      = packets[len(packets)-1].Block
 		send      = func(packet Packet) {
 			if err := w.writeTo(addr, packet.Data); err != nil {

@@ -1035,7 +1035,7 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 }
 
 func (c *Client) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
-	if pkt, err := new(Rck{Block: block, ReqID: reqID, UUID: UUID}).Marshal(); err != nil {
+	if pkt, err := new(Rck{ReqHeader{Block: block, ReqID: reqID, UUID: UUID}}).Marshal(); err != nil {
 		log.Printf("rck marshal failed: %v", err)
 	} else if err = c.writeTo(addr, pkt); err != nil {
 		log.Printf("[%s] rck failed: %v", addr, err)

@@ -83,9 +83,9 @@ func (op *OpCode) String() string {
 	case OpSignedMSG:
 		return "SignedMSG"
 	case OpAck:
-		return "Ack"
+		return "ACK"
 	case OpNck:
-		return "Nck"
+		return "NCK"
 	case OpErr:
 		return "Err"
 	case OpSyncIcon:
@@ -127,9 +127,9 @@ func (op *OpCode) String() string {
 	case OpDiscoveryResp:
 		return "DiscoveryResp"
 	case OpRck:
-		return "Rck"
+		return "RCK"
 	case OpFin:
-		return "Fin"
+		return "FIN"
 	}
 	return "unknown"
 }
@@ -428,14 +428,41 @@ func (d *Data) Unmarshal(p []byte) error {
 	return nil
 }
 
-type SignReq struct {
-	Block uint32
-	SignBody
-}
-
 type SignBody struct {
 	Sign string
 	UUID string
+}
+
+func (s *SignBody) Marshal(b *bytes.Buffer) error {
+	err := writeString(b, s.Sign) // write Sign
+	if err != nil {
+		return err
+	}
+
+	err = writeString(b, s.UUID) // write UUID
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *SignBody) Unmarshal(r *bytes.Buffer) (err error) {
+	s.Sign, err = readString(r) // read sign
+	if err != nil {
+		return InvalidData
+	}
+
+	s.UUID, err = readString(r) // read UUID
+	if err != nil {
+		return InvalidData
+	}
+	return nil
+}
+
+type SignReq struct {
+	Block uint32
+	SignBody
 }
 
 func (s *SignReq) Marshal() ([]byte, error) {
@@ -452,12 +479,7 @@ func (s *SignReq) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = writeString(b, s.Sign) // write Sign
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, s.UUID) // write UUID
+	err = s.SignBody.Marshal(b) // write sign body
 	if err != nil {
 		return nil, err
 	}
@@ -468,26 +490,17 @@ func (s *SignReq) Marshal() ([]byte, error) {
 func (s *SignReq) Unmarshal(p []byte) error {
 	r := bytes.NewBuffer(p)
 	var opcode OpCode
-	err := binary.Read(r, binary.BigEndian, &opcode)
+	err := binary.Read(r, binary.BigEndian, &opcode) // read operation code
 	if err != nil || opcode != OpSign {
 		return InvalidData
 	}
 
-	err = binary.Read(r, binary.BigEndian, &s.Block)
+	err = binary.Read(r, binary.BigEndian, &s.Block) // read block number
 	if err != nil {
 		return InvalidData
 	}
 
-	s.Sign, err = readString(r) // read sign
-	if err != nil {
-		return InvalidData
-	}
-
-	s.UUID, err = readString(r) // read UUID
-	if err != nil {
-		return InvalidData
-	}
-	return nil
+	return s.SignBody.Unmarshal(r) // read sign body
 }
 
 type SignedMessage struct {
@@ -509,11 +522,15 @@ func (m *SignedMessage) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	sign, err := m.SignReq.Marshal()
+	err = binary.Write(b, binary.BigEndian, m.Block) // write block number
 	if err != nil {
 		return nil, err
 	}
-	b.Write(sign[2:])
+
+	err = m.SignBody.Marshal(b) // write sign body
+	if err != nil {
+		return nil, err
+	}
 
 	err = binary.Write(b, binary.BigEndian, m.CreatedAt) // write create time
 	if err != nil {
@@ -540,12 +557,7 @@ func (m *SignedMessage) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	m.SignReq.Sign, err = readString(r)
-	if err != nil {
-		return InvalidData
-	}
-
-	m.SignReq.UUID, err = readString(r)
+	err = m.SignBody.Unmarshal(r) // read sign body
 	if err != nil {
 		return InvalidData
 	}
@@ -625,10 +637,52 @@ func (n *CtrlReq) Unmarshal(p []byte) error {
 	return nil
 }
 
-type Fin struct {
+type ReqHeader struct {
 	Block uint32
 	ReqID uint32
 	UUID  string
+}
+
+func (s *ReqHeader) Marshal(b *bytes.Buffer) error {
+	err := binary.Write(b, binary.BigEndian, s.Block) // write block number
+	if err != nil {
+		return err
+	}
+
+	err = binary.Write(b, binary.BigEndian, s.ReqID) // write req id
+	if err != nil {
+		return err
+	}
+
+	err = writeString(b, s.UUID) // write uuid
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *ReqHeader) Unmarshal(b *bytes.Buffer) error {
+	err := binary.Read(b, binary.BigEndian, &s.Block) // read block number
+	if err != nil {
+		return InvalidData
+	}
+
+	err = binary.Read(b, binary.BigEndian, &s.ReqID) // read req id
+	if err != nil {
+		return InvalidData
+	}
+
+	s.UUID, err = readString(b) // read uuid
+	if err != nil {
+		return InvalidData
+	}
+
+	return nil
+}
+
+type Fin struct {
+	ReqHeader
 }
 
 func (s *Fin) Marshal() ([]byte, error) {
@@ -641,17 +695,7 @@ func (s *Fin) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = binary.Write(b, binary.BigEndian, s.Block) // write block number
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(b, binary.BigEndian, s.ReqID) // write req id
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, s.UUID) // write uuid
+	err = s.ReqHeader.Marshal(b) // write header
 	if err != nil {
 		return nil, err
 	}
@@ -672,22 +716,7 @@ func (s *Fin) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	err = binary.Read(b, binary.BigEndian, &s.Block) // read block number
-	if err != nil {
-		return InvalidData
-	}
-
-	err = binary.Read(b, binary.BigEndian, &s.ReqID) // read req id
-	if err != nil {
-		return InvalidData
-	}
-
-	s.UUID, err = readString(b) // read uuid
-	if err != nil {
-		return InvalidData
-	}
-
-	return nil
+	return s.ReqHeader.Unmarshal(b)
 }
 
 type Check struct {
@@ -746,9 +775,7 @@ func (c *Check) Unmarshal(p []byte) error {
 }
 
 type Rck struct {
-	Block uint32
-	ReqID uint32
-	UUID  string
+	ReqHeader
 }
 
 func (r *Rck) ID() uint32 {
@@ -766,17 +793,7 @@ func (r *Rck) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = binary.Write(b, binary.BigEndian, r.Block) // write block number
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(b, binary.BigEndian, r.ReqID) // write req id
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, r.UUID) // write uuid
+	err = r.ReqHeader.Marshal(b) // write header
 	if err != nil {
 		return nil, err
 	}
@@ -797,22 +814,7 @@ func (r *Rck) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	err = binary.Read(b, binary.BigEndian, &r.Block) // read block number
-	if err != nil {
-		return InvalidData
-	}
-
-	err = binary.Read(b, binary.BigEndian, &r.ReqID) // read req id
-	if err != nil {
-		return InvalidData
-	}
-
-	r.UUID, err = readString(b) // read uuid
-	if err != nil {
-		return InvalidData
-	}
-
-	return nil
+	return r.ReqHeader.Unmarshal(b)
 }
 
 type Ack struct {
@@ -1051,12 +1053,7 @@ func (pr *PullReq) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = writeString(b, pr.Sign) // write sign
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, pr.UUID) // write uuid
+	err = pr.SignBody.Marshal(b) // write sign body
 	if err != nil {
 		return nil, err
 	}
@@ -1097,12 +1094,7 @@ func (pr *PullReq) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	pr.Sign, err = readString(r) //  read sign
-	if err != nil {
-		return InvalidData
-	}
-
-	pr.UUID, err = readString(r) // read uuid
+	err = pr.SignBody.Unmarshal(r) //  read sign body
 	if err != nil {
 		return InvalidData
 	}
@@ -1153,12 +1145,7 @@ func (r *ReplyReq) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	err = writeString(b, r.Sign) // write sign
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, r.UUID) // write uuid
+	err = r.SignBody.Marshal(b) // write sign body
 	if err != nil {
 		return nil, err
 	}
@@ -1197,12 +1184,7 @@ func (r *ReplyReq) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	r.Sign, err = readString(b) //  read sign
-	if err != nil {
-		return InvalidData
-	}
-
-	r.UUID, err = readString(b) // read uuid
+	err = r.SignBody.Unmarshal(b) // read sign body
 	if err != nil {
 		return InvalidData
 	}
