@@ -19,69 +19,166 @@ type connManager struct {
 	remoteAddr net.Addr
 }
 type blockManager struct {
+	single
+	multiple
+}
+
+type single struct {
 	sync.RWMutex
-	rck     map[CacheKey]chan uint32        // rck cache : CacheKey -> rck block
-	fin     map[CacheKey]chan uint32        // fin cache : CacheKey -> fin block
 	ackFunc map[CacheKey]context.CancelFunc // CacheKey -> context.CancelFunc
 	retry   map[CacheKey]chan struct{}      // CacheKey -> chan struct{}
 }
 
-func (b *blockManager) putACK(cacheKey CacheKey, ackFunc context.CancelFunc) {
-	b.Lock()
-	b.ackFunc[cacheKey] = ackFunc
-	b.Unlock()
+type multiple struct {
+	sync.RWMutex
+	rck map[CacheKey]chan uint32      // rck cache : CacheKey -> chan rck block
+	fin map[CacheKey]chan uint32      // fin cache : CacheKey -> chan fin block
+	req map[CacheKey]chan ReliableReq // req cache : CacheKey -> chan ReliableReq
+	ret map[CacheKey]chan ReliableReq // ret cache : CacheKey -> chan ReliableReq
 }
 
-func (b *blockManager) deleteACK(cacheKey CacheKey) {
-	b.Lock()
-	delete(b.ackFunc, cacheKey)
-	b.Unlock()
+func (s *single) storeACK(cacheKey CacheKey, ackFunc context.CancelFunc) {
+	s.Lock()
+	s.ackFunc[cacheKey] = ackFunc
+	s.Unlock()
 }
 
-func (b *blockManager) putRCK(cacheKey CacheKey, rck chan uint32) {
-	b.Lock()
-	b.rck[cacheKey] = rck
-	b.Unlock()
+func (s *single) deleteACK(cacheKey CacheKey) {
+	s.Lock()
+	delete(s.ackFunc, cacheKey)
+	s.Unlock()
 }
 
-func (b *blockManager) deleteRCK(cacheKey CacheKey) {
-	b.Lock()
-	delete(b.rck, cacheKey)
-	b.Unlock()
+func (s *single) storeACKAndRetry(cacheKey CacheKey, ack context.CancelFunc, retryCh chan struct{}) {
+	s.Lock()
+	s.ackFunc[cacheKey] = ack
+	s.retry[cacheKey] = retryCh
+	s.Unlock()
 }
 
-func (b *blockManager) putFIN(cacheKey CacheKey, fin chan uint32) {
-	b.Lock()
-	b.fin[cacheKey] = fin
-	b.Unlock()
+func (s *single) deleteACKAndRetry(cacheKey CacheKey) {
+	s.Lock()
+	delete(s.ackFunc, cacheKey)
+	delete(s.retry, cacheKey)
+	s.Unlock()
 }
 
-func (b *blockManager) deleteFIN(cacheKey CacheKey) {
-	b.Lock()
-	delete(b.fin, cacheKey)
-	b.Unlock()
+func (s *single) complete(cacheKey CacheKey) {
+	s.RLock()
+	defer s.RUnlock()
+	if ackFunc, ok := s.ackFunc[cacheKey]; ok {
+		ackFunc()
+	}
 }
 
-func (b *blockManager) putACKAndRetry(cacheKey CacheKey, ack context.CancelFunc, retryCh chan struct{}) {
-	b.Lock()
-	b.ackFunc[cacheKey] = ack
-	b.retry[cacheKey] = retryCh
-	b.Unlock()
+func (s *single) retryNow() {
+	s.RLock()
+	defer s.RUnlock()
+	for _, v := range s.retry {
+		v <- struct{}{}
+	}
 }
 
-func (b *blockManager) deleteACKAndRetry(cacheKey CacheKey) {
-	b.Lock()
-	delete(b.ackFunc, cacheKey)
-	delete(b.retry, cacheKey)
-	b.Unlock()
+func (m *multiple) storeRCK(cacheKey CacheKey, rck chan uint32) {
+	m.Lock()
+	m.rck[cacheKey] = rck
+	m.Unlock()
+}
+
+func (m *multiple) deleteRCK(cacheKey CacheKey) {
+	m.Lock()
+	delete(m.rck, cacheKey)
+	m.Unlock()
+}
+
+func (m *multiple) storeFIN(cacheKey CacheKey, fin chan uint32) {
+	m.Lock()
+	m.fin[cacheKey] = fin
+	m.Unlock()
+}
+
+func (m *multiple) loadOrStoreFIN(cacheKey CacheKey) chan uint32 {
+	m.Lock()
+	defer m.Unlock()
+	if c, ok := m.fin[cacheKey]; ok {
+		return c
+	}
+	c := make(chan uint32, 1)
+	m.fin[cacheKey] = c
+	return c
+}
+
+func (m *multiple) deleteFIN(cacheKey CacheKey) {
+	m.Lock()
+	delete(m.fin, cacheKey)
+	m.Unlock()
+}
+
+func (m *multiple) storeREQ(cacheKey CacheKey, req chan ReliableReq) {
+	m.Lock()
+	m.req[cacheKey] = req
+	m.Unlock()
+}
+
+func (m *multiple) deleteREQ(cacheKey CacheKey) {
+	m.Lock()
+	delete(m.req, cacheKey)
+	m.Unlock()
+}
+
+func (m *multiple) storeRET(cacheKey CacheKey, ret chan ReliableReq) {
+	m.Lock()
+	m.ret[cacheKey] = ret
+	m.Unlock()
+}
+
+func (m *multiple) deleteRET(cacheKey CacheKey) {
+	m.Lock()
+	delete(m.ret, cacheKey)
+	m.Unlock()
+}
+
+func (m *multiple) loadRET(cacheKey CacheKey) <-chan ReliableReq {
+	m.RLock()
+	defer m.RUnlock()
+	return m.ret[cacheKey]
+}
+
+func (m *multiple) loadOrStoreRET(cacheKey CacheKey) chan ReliableReq {
+	m.Lock()
+	defer m.Unlock()
+	if c, ok := m.ret[cacheKey]; ok {
+		return c
+	}
+	c := make(chan ReliableReq, 200)
+	m.ret[cacheKey] = c
+	return c
+}
+
+func (m *multiple) patch(cacheKey CacheKey, block uint32) {
+	m.RLock()
+	defer m.RUnlock()
+	if c, ok := m.rck[cacheKey]; ok {
+		c <- block
+	}
+}
+
+func (m *multiple) finish(cacheKey CacheKey, block uint32) {
+	m.loadOrStoreFIN(cacheKey) <- block
 }
 
 func newBlockManager() *blockManager {
 	return &blockManager{
-		rck:     make(map[CacheKey]chan uint32),
-		fin:     make(map[CacheKey]chan uint32),
-		ackFunc: make(map[CacheKey]context.CancelFunc),
-		retry:   make(map[CacheKey]chan struct{}),
+		single{
+			ackFunc: make(map[CacheKey]context.CancelFunc),
+			retry:   make(map[CacheKey]chan struct{}),
+		},
+		multiple{
+			rck: make(map[CacheKey]chan uint32),
+			fin: make(map[CacheKey]chan uint32),
+			req: make(map[CacheKey]chan ReliableReq),
+			ret: make(map[CacheKey]chan ReliableReq),
+		},
 	}
 }
 
@@ -98,7 +195,7 @@ func (c *connManager) reliableWriteTo(addr net.Addr, data []byte, block uint32) 
 	retryCh := make(chan struct{}, 1)
 
 	cacheKey := newBlockKey(block)
-	c.putACKAndRetry(cacheKey, ack, retryCh)
+	c.storeACKAndRetry(cacheKey, ack, retryCh)
 	defer c.deleteACKAndRetry(cacheKey)
 
 	return c.reliableWriter.reliableWrite(ctx, retryCh, addr, data, block)
@@ -197,38 +294,6 @@ func (w *reliableWriter) reliableWrite(ack context.Context, retry <-chan struct{
 	return errors.New(fmt.Sprintf("[%v] exhausted retries", code))
 }
 
-func (w *reliableWriter) complete(cacheKey CacheKey) {
-	w.RLock()
-	defer w.RUnlock()
-	if ackFunc, ok := w.ackFunc[cacheKey]; ok {
-		ackFunc()
-	}
-}
-
-func (w *reliableWriter) patch(cacheKey CacheKey, block uint32) {
-	w.RLock()
-	defer w.RUnlock()
-	if c, ok := w.rck[cacheKey]; ok {
-		c <- block
-	}
-}
-
-func (w *reliableWriter) finish(cacheKey CacheKey, block uint32) {
-	w.RLock()
-	defer w.RUnlock()
-	if c, ok := w.fin[cacheKey]; ok {
-		c <- block
-	}
-}
-
-func (w *reliableWriter) retryNow() {
-	w.RLock()
-	defer w.RUnlock()
-	for _, v := range w.retry {
-		v <- struct{}{}
-	}
-}
-
 // writeTo write with no retry
 func (w *reliableWriter) writeTo(addr net.Addr, pkt []byte) error {
 	if err := w.conn.SetWriteDeadline(time.Now().Add(_TIMEOUT)); err != nil {
@@ -269,27 +334,29 @@ func (w *reliableWriter) listen() error {
 	return nil
 }
 
-func (w *reliableWriter) reliableMultiWrite(addr net.Addr, packets []Packet, sender string, block uint32) {
+func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, packets []ReliableReq) {
 	var (
 		rck       = make(chan uint32)
-		cacheKey  = newCacheKey(sender, block)
 		last      = uint32(len(packets))
-		finPkt, _ = new(Fin{ReqHeader{UUID: sender, ReqID: block, Block: last}}).Marshal()
-		send      = func(packet Packet) {
-			if err := w.writeTo(addr, packet.Data); err != nil {
-				code := new(OpCode(binary.BigEndian.Uint16(packet.Data[:2]))).String()
-				log.Printf("[%v] write [%v] to [%v] failed: %v", code, block, addr.String(), err)
+		finPkt, _ = new(Fin{ReqHeader{UUID: cacheKey.UUID, ReqID: cacheKey.Block, Block: last}}).Marshal()
+		send      = func(packet ReliableReq) {
+			if data, err := packet.Marshal(); err != nil {
+				log.Printf("[%v] marshal failed: %v", new(OpReq).String(), err)
+			} else if err = w.writeTo(addr, data); err != nil {
+				bodyOffset := 2 + 4 + 4 + len(packet.UUID) + 1
+				code := new(OpCode(binary.BigEndian.Uint16(data[bodyOffset : bodyOffset+2]))).String()
+				log.Printf("[%v] write [%v] to [%v] failed: %v", code, cacheKey.Block, addr.String(), err)
 			}
 		}
 	)
-	w.putRCK(cacheKey, rck)
+	w.storeRCK(cacheKey, rck)
 	defer w.deleteRCK(cacheKey)
 	for i := 0; i < len(packets); i++ {
 		send(packets[i])
 	}
 	for attempt := byte(0); attempt < w.retries; attempt++ {
 		if err := w.writeTo(addr, finPkt); err != nil {
-			log.Printf("write fin [%v] to [%v] failed: %v", block, addr.String(), err)
+			log.Printf("write fin [%v] to [%v] failed: %v", cacheKey.Block, addr.String(), err)
 		}
 		timer := time.After(time.Duration(w.rto.Load()))
 		select {
@@ -297,7 +364,7 @@ func (w *reliableWriter) reliableMultiWrite(addr net.Addr, packets []Packet, sen
 			if r > last {
 				return
 			}
-			packets = slices.DeleteFunc(packets, func(packet Packet) bool {
+			packets = slices.DeleteFunc(packets, func(packet ReliableReq) bool {
 				return packet.Block < r
 			})
 			if len(packets) == 0 {
@@ -309,7 +376,68 @@ func (w *reliableWriter) reliableMultiWrite(addr net.Addr, packets []Packet, sen
 				attempt = 0
 			}
 		case <-timer:
-			log.Printf("fin %v timeout", block)
+			log.Printf("fin %v timeout", cacheKey.Block)
 		}
 	}
+}
+
+func (w *reliableWriter) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
+	if pkt, err := new(Rck{ReqHeader{Block: block, ReqID: reqID, UUID: UUID}}).Marshal(); err != nil {
+		log.Printf("rck marshal failed: %v", err)
+	} else if err = w.writeTo(addr, pkt); err != nil {
+		log.Printf("[%s] rck failed: %v", addr, err)
+	}
+}
+
+func (w *reliableWriter) receive(addr net.Addr, req ReliableReq) {
+	cacheKey := newCacheKey(req.UUID, req.ReqID)
+	w.multiple.Lock()
+	c, ok := w.req[cacheKey]
+	if !ok {
+		c = make(chan ReliableReq, 200)
+		go w.processReq(addr, cacheKey, c)
+		w.req[cacheKey] = c
+	}
+	w.multiple.Unlock()
+	c <- req
+}
+
+func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, req chan ReliableReq) {
+	fin := w.loadOrStoreFIN(cacheKey)
+	ret := w.loadOrStoreRET(cacheKey)
+	defer w.deleteREQ(cacheKey)
+	defer w.deleteFIN(cacheKey)
+	defer func() {
+		w.deleteRET(cacheKey)
+		close(ret)
+	}()
+	rt := new(RangeTracker)
+LOOP:
+	for {
+		timer := time.After(10 * time.Second)
+		select {
+		case d := <-req:
+			r := MonoRange(d.Block)
+			if rt.Contains(r) {
+				continue
+			}
+			rt.Track(r)
+			ret <- d
+		case finBlock := <-fin:
+			rt.Track(MonoRange(finBlock + 1))
+			var next uint32
+			if rt.isCompleted() {
+				next = finBlock + 1
+			} else {
+				next = rt.Get()[0].start
+			}
+			w.rck(addr, cacheKey.UUID, next, cacheKey.Block)
+			if rt.isCompleted() {
+				break LOOP
+			}
+		case <-timer:
+			return
+		}
+	}
+	log.Printf("[%v] %v completed", new(OpReq).String(), cacheKey)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -358,7 +359,6 @@ type messages struct {
 	FileMessages   chan WriteReq      `json:"-"` // audio and image
 	SubMessages    chan ReadReq       `json:"-"` // subscribe requests
 	CtrlMessages   chan CtrlReq       `json:"-"` // control requests
-	discoveries    sync.Map           // reqID -> chan DiscoveryResp
 }
 
 type tracker struct {
@@ -681,48 +681,31 @@ func (c *Client) ReadIcon(target string) error {
 }
 
 func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
-	reqID := c.nextID()
-	resp := make(chan DiscoveryResp, 150)
-	c.discoveries.Store(reqID, resp)
-	defer c.discoveries.Delete(reqID)
-	fin := make(chan uint32, 1)
-	key := newCacheKey(c.ID(), reqID)
-	c.putFIN(key, fin)
-	defer c.deleteFIN(key)
-
+	var (
+		discoveryResp DiscoveryResp
+		reqID         = c.nextID()
+		key           = newCacheKey(c.ID(), reqID)
+		resp          = c.loadOrStoreRET(key)
+		ret           = make([]string, 0)
+	)
 	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
-		log.Printf("discovery failed: %v", err)
+		return nil, fmt.Errorf("discovery failed: %v", err)
 	}
-	rt := new(RangeTracker)
-	ret := make([]string, 0)
-LOOP:
 	for {
 		timer := time.After(10 * time.Second)
 		select {
-		case d := <-resp:
-			r := MonoRange(d.Block)
-			if rt.Contains(r) {
-				continue
+		case req, ok := <-resp:
+			if !ok {
+				return ret, nil
 			}
-			ret = append(ret, d.UUIDS...)
-			rt.Track(r)
-		case finBlock := <-fin:
-			rt.Track(MonoRange(finBlock + 1))
-			var next uint32
-			if rt.isCompleted() {
-				next = finBlock
-			} else {
-				next = rt.Get()[0].start
+			if err := discoveryResp.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {
+				log.Printf("discovery response unmarshal failed: %v", err)
 			}
-			c.rck(c.remoteAddr, c.ID(), next, reqID)
-			if rt.isCompleted() {
-				break LOOP
-			}
+			ret = append(ret, discoveryResp.UUIDS...)
 		case <-timer:
 			return nil, errors.New("discovery timed out")
 		}
 	}
-	return ret, nil
 }
 
 func (c *Client) Pull() {
@@ -899,18 +882,18 @@ func (c *Client) serve() {
 
 func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
-		ack       Ack
-		nck       Nck
-		fin       Fin
-		msg       SignedMessage
-		data      Data
-		ec        ErrCode
-		rrq       ReadReq
-		wrq       WriteReq
-		check     Check
-		ctrl      CtrlReq
-		reply     ReplyReq
-		discovery DiscoveryResp
+		ack   Ack
+		nck   Nck
+		fin   Fin
+		msg   SignedMessage
+		data  Data
+		ec    ErrCode
+		rrq   ReadReq
+		wrq   WriteReq
+		check Check
+		ctrl  CtrlReq
+		reply ReplyReq
+		req   = ReliableReq{ReqBody: &ReqData{}}
 	)
 	switch {
 	case ack.Unmarshal(buf) == nil:
@@ -988,8 +971,6 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 		log.Printf("nck received, [%v]-[%v]", nck.UUID, nck.Block)
 		c.req <- nck
-	case fin.Unmarshal(buf) == nil:
-		c.finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
@@ -1004,12 +985,10 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		for _, r := range reply.ranges {
 			tracker.Track(r)
 		}
-	case discovery.Unmarshal(buf) == nil:
-		dc, ok := c.discoveries.Load(discovery.ReqID)
-		if !ok {
-			return
-		}
-		dc.(chan DiscoveryResp) <- discovery
+	case req.Unmarshal(buf) == nil:
+		c.receive(addr, req)
+	case fin.Unmarshal(buf) == nil:
+		c.finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	default:
 		code := OpCode(binary.BigEndian.Uint16(buf[:2]))
 		log.Printf("unknown pkt, %v, %v", code.String(), buf)
@@ -1028,14 +1007,6 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 		log.Printf("ack marshal failed: %v", err)
 	} else if err = c.writeTo(addr, pkt); err != nil {
 		log.Printf("[%s] ack failed: %v", addr, err)
-	}
-}
-
-func (c *Client) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
-	if pkt, err := new(Rck{ReqHeader{Block: block, ReqID: reqID, UUID: UUID}}).Marshal(); err != nil {
-		log.Printf("rck marshal failed: %v", err)
-	} else if err = c.writeTo(addr, pkt); err != nil {
-		log.Printf("[%s] rck failed: %v", addr, err)
 	}
 }
 

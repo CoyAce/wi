@@ -352,34 +352,30 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 
 func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
-	resp := s.toDiscoveryResp(users, drq.Block)
-	packets := make([]Packet, 0, len(resp))
-	for i, d := range resp {
-		v, err := d.Marshal()
-		if err != nil {
-			log.Printf("discovery marshal failed: %v", err)
-		}
-		packets = append(packets, Packet{Block: uint32(i + 1), Data: v})
-	}
-
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		s.dispatchInOrder(addr, packets, v.(Peer).UUID, drq.Block)
+		headerSize := 11 + len(v.(Peer).UUID)
+		resp := s.toDiscoveryResp(users, headerSize)
+		packets := make([]ReliableReq, 0, len(resp))
+		for i, d := range resp {
+			packets = append(packets, ReliableReq{ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, &d})
+		}
+		s.dispatchInOrder(addr, packets, newCacheKey(v.(Peer).UUID, drq.Block))
 	}
 }
 
-func (s *Server) toDiscoveryResp(users []string, reqID uint32) []DiscoveryResp {
-	const maxSize = DatagramSize - 12
+func (s *Server) toDiscoveryResp(users []string, baseSize int) []DiscoveryResp {
+	maxSize := DatagramSize - baseSize - 3 // DatagramSize - OpCode - len(UUIDS)
 	ret := make([]DiscoveryResp, 0, 20)
-	prev, size, index := 0, 0, uint32(1)
+	prev, size := 0, 0
 	for i := 0; i < len(users); i++ {
 		n := 1 + len(users[i])
 		if size+n > maxSize {
-			ret = append(ret, DiscoveryResp{Block: index, ReqID: reqID, UUIDS: users[prev:i]})
-			prev, size, index = i, 0, index+1
+			ret = append(ret, DiscoveryResp{UUIDS: users[prev:i]})
+			prev, size = i, 0
 		}
 		size += n
 	}
-	return append(ret, DiscoveryResp{Block: index, ReqID: reqID, UUIDS: users[prev:]})
+	return append(ret, DiscoveryResp{UUIDS: users[prev:]})
 }
 
 func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
@@ -668,9 +664,9 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 	})
 }
 
-func (s *Server) dispatchInOrder(addr net.Addr, packets []Packet, sender string, block uint32) {
+func (s *Server) dispatchInOrder(addr net.Addr, packets []ReliableReq, cacheKey CacheKey) {
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		v.(Peer).reliableMultiWrite(addr, packets, sender, block)
+		v.(Peer).reliableMultiWrite(addr, cacheKey, packets)
 	}
 }
 
@@ -697,7 +693,7 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 	p, code, key := v.(Peer), OpCode(binary.BigEndian.Uint16(data[:2])), newCacheKey(sender, block)
 	ctx, ack := context.WithCancel(context.Background())
 	defer ack()
-	p.putACK(key, ack)
+	p.storeACK(key, ack)
 	defer p.deleteACK(key)
 
 	log.Printf("[%v] dispatch packet %v to [%v]-[%v]", code.String(), block, p.UUID, target)

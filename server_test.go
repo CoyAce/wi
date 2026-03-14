@@ -307,6 +307,7 @@ func TestServerDupMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.dispatch(addr, msgPkt, sign.UUID, sign.Block)
+	time.Sleep(1 * time.Millisecond)
 	select {
 	case received := <-receiver.SignedMessages:
 		if !reflect.DeepEqual(received, msg) {
@@ -316,6 +317,7 @@ func TestServerDupMessage(t *testing.T) {
 		t.Errorf("no message received")
 	}
 	s.dispatch(addr, msgPkt, sign.UUID, sign.Block)
+	time.Sleep(1 * time.Millisecond)
 	select {
 	case received := <-receiver.SignedMessages:
 		t.Errorf("duplicated message %v", received)
@@ -546,8 +548,8 @@ func TestCheck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cacheKey := newCacheKey(msg.UUID, msg.Block)
 	p := v.(Peer)
-	p.putACK(cacheKey, cancel)
-	defer p.deleteRCK(cacheKey)
+	p.storeACK(cacheKey, cancel)
+	defer p.deleteACK(cacheKey)
 	defer cancel()
 	check := Check{msg.Block, msg.UUID}
 	pkt, _ = check.Marshal()
@@ -565,7 +567,8 @@ func TestCheck(t *testing.T) {
 func TestDiscovery(t *testing.T) {
 	s, serverAddr := setUpServer(t)
 	wg := sync.WaitGroup{}
-	for i := 0; i < 200; i++ {
+	cnt := 200
+	for i := 0; i < cnt; i++ {
 		u := fmt.Sprintf("user_prefix_abcdefghij#000%d", i)
 		wg.Add(1)
 		go func() {
@@ -576,7 +579,7 @@ func TestDiscovery(t *testing.T) {
 	}
 	wg.Wait()
 	ret := s.collectUsers("default", Online)
-	if len(ret) != 200 {
+	if len(ret) != cnt {
 		t.Errorf("expected 200 users; actual %d", len(ret))
 	}
 	ret = s.collectUsers("default", Active)
@@ -588,8 +591,8 @@ func TestDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ret) != 201 {
-		t.Errorf("expected 201 users; actual %d", len(ret))
+	if len(ret) != cnt+1 {
+		t.Errorf("expected %v users; actual %d", cnt+1, len(ret))
 	}
 	users := s.collectUsers("default", Online)
 	sort.Strings(users)
@@ -610,7 +613,7 @@ func TestDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ret) != 1 {
-		t.Errorf("expected  users; actual %d", len(ret))
+		t.Errorf("expected 1 users; actual %d", len(ret))
 	}
 }
 
@@ -630,6 +633,30 @@ func TestReply(t *testing.T) {
 	s.reply(PullReq{Block: c.nextID(), SignBody: *sign, Range: r, ranges: tracker.ranges}, a, tracker.ranges)
 	if len(tracker.ranges) != 0 {
 		t.Errorf("expected 0; actual %d", len(tracker.ranges))
+	}
+}
+
+func TestMultiWrite(t *testing.T) {
+	s, serverAddr := setUpServer(t)
+	c := newClient(serverAddr, "c")
+	c.SignIn()
+	key := newCacheKey(c.ID(), 1)
+	if v, ok := s.addrToPeer.Load(c.conn.LocalAddr().String()); ok {
+		rck := make(chan uint32)
+		v.(Peer).storeRCK(key, rck)
+		header := ReqHeader{Block: 1, ReqID: key.Block, UUID: key.UUID}
+		data, err := new(ReliableReq{header, new(ReqData("hello"))}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = v.(Peer).writeTo(c.conn.LocalAddr(), data)
+		time.Sleep(1 * time.Millisecond)
+		finPkt, _ := new(Fin{header}).Marshal()
+		_ = v.(Peer).writeTo(c.conn.LocalAddr(), finPkt)
+		r := <-rck
+		if r != 2 {
+			t.Errorf("expected 2; actual %d", r)
+		}
 	}
 }
 
