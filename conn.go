@@ -257,23 +257,24 @@ type reliableWriter struct {
 // if timeout, try sending check packet to see if ack lost.
 func (w *reliableWriter) reliableWrite(ack context.Context, retry <-chan struct{}, addr net.Addr, data []byte, block uint32) error {
 	var (
-		start time.Time
-		code  = new(OpCode(binary.BigEndian.Uint16(data[:2]))).String()
-		err   error
+		start        time.Time
+		code         = new(OpCode(binary.BigEndian.Uint16(data[:2]))).String()
+		err          error
+		writeOrCheck = func(attempt uint8) error {
+			if attempt%2 != 0 {
+				log.Printf("[%v] check packet: %v", code, block)
+				check := Check{Block: block}
+				pkt, _ := check.Marshal()
+				return w.writeTo(addr, pkt)
+			}
+			log.Printf("[%v] write packet: %v", code, block)
+			start = time.Now()
+			return w.writeTo(addr, data)
+		}
 	)
 
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
-		if attempt%2 == 0 {
-			log.Printf("[%v] send packet: %v", code, block)
-			start = time.Now()
-			err = w.writeTo(addr, data)
-		} else {
-			log.Printf("[%v] send check: %v", code, block)
-			check := Check{Block: block}
-			pkt, _ := check.Marshal()
-			err = w.writeTo(addr, pkt)
-		}
-		if err != nil {
+		if err = writeOrCheck(attempt); err != nil {
 			log.Printf("[%v] write failed: %v", code, err)
 			if errors.Is(err, syscall.EPIPE) {
 				w.relisten()
