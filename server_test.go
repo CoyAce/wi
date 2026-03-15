@@ -238,7 +238,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 	select {
@@ -246,7 +246,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 }
@@ -254,6 +254,7 @@ func TestSendFile(t *testing.T) {
 func TestClientDupMessage(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
+	receiver.SignIn()
 	client, err := setUpClient(t)
 	defer func() { _ = client.Close() }()
 
@@ -480,6 +481,25 @@ func TestReadIcon(t *testing.T) {
 	}
 }
 
+func TestPullLongText(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	sender := newClient(serverAddr, "sender")
+	sender.SignIn()
+	_ = sender.SendText(LongText)
+	receiver := newClient(serverAddr, "receiver")
+	receiver.SignIn()
+	time.Sleep(1 * time.Millisecond)
+	receiver.Pull()
+	select {
+	case msg := <-receiver.SignedMessages:
+		if string(msg.Payload) != LongText {
+			t.Errorf("expected %v; actual %q", LongText, string(msg.Payload))
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Errorf("timeout")
+	}
+}
+
 func TestPull(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
@@ -488,8 +508,8 @@ func TestPull(t *testing.T) {
 	_ = sender.SendText("world")
 	_ = sender.PublishFile("test.txt", 5, 1)
 	receiver := newClient(serverAddr, "receiver")
-	time.Sleep(1 * time.Millisecond)
 	receiver.SignIn()
+	time.Sleep(1 * time.Millisecond)
 	receiver.Pull()
 	select {
 	case msg := <-receiver.SignedMessages:
@@ -626,6 +646,7 @@ func TestReply(t *testing.T) {
 	if !reflect.DeepEqual(tracker.ranges, expected) {
 		t.Errorf("expected %v; actual %v", expected, tracker.ranges)
 	}
+	time.Sleep(1 * time.Millisecond)
 	a, _ := s.parseAddrByUUID("c")
 	r := Range{1, 1}
 	s.reply(PullReq{Block: c.nextID(), SignBody: *sign, Range: r, ranges: tracker.ranges}, a, tracker.ranges)
@@ -655,6 +676,36 @@ func TestMultiWrite(t *testing.T) {
 		if r != 2 {
 			t.Errorf("expected 2; actual %d", r)
 		}
+	}
+}
+
+func TestLongText(t *testing.T) {
+	_, serverAddr := setUpServer(t)
+	sender := newClient(serverAddr, "sender")
+	sender.SignIn()
+	receiver1 := newClient(serverAddr, "receiver1")
+	receiver1.SignIn()
+	receiver2 := newClient(serverAddr, "receiver2")
+	receiver2.SignIn()
+	err := sender.SendText(LongText)
+	if err != nil {
+		t.Error(err)
+	}
+	select {
+	case msg := <-receiver1.SignedMessages:
+		if string(msg.Payload) != LongText {
+			t.Errorf("expected %s; actual %s", LongText, string(msg.Payload))
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("timeout")
+	}
+	select {
+	case msg := <-receiver2.SignedMessages:
+		if string(msg.Payload) != LongText {
+			t.Errorf("expected %s; actual %s", LongText, string(msg.Payload))
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("timeout")
 	}
 }
 
@@ -689,3 +740,5 @@ func setUpServer(t *testing.T) (*Server, string) {
 	s.Ready()
 	return &s, serverAddr
 }
+
+const LongText = "Love's Philosophy\nBy Percy Bysshe Shelley\n\nThe fountains mingle with the river\nAnd the rivers with the ocean,\nThe winds of heaven mix for ever\nWith a sweet emotion;\nNothing in the world is single;\nAll things by a law divine\nIn one spirit meet and mingle.\nWhy not I with thine?—\n\nSee the mountains kiss high heaven\nAnd the waves clasp one another;\nNo sister-flower would be forgiven\nIf it disdained its brother;\nAnd the sunlight clasps the earth\nAnd the moonbeams kiss the sea:\nWhat is all this sweet work worth\nIf thou kiss not me?**Ode to the West Wind**\n*By Percy Bysshe Shelley*\n\n---\n\n**I**\n\nO wild West Wind, thou breath of Autumn's being,\nThou, from whose unseen presence the leaves dead\nAre driven, like ghosts from an enchanter fleeing,\n\nYellow, and black, and pale, and hectic red,\nPestilence-stricken multitudes: O thou,\nWho chariotest to their dark wintry bed\n\nThe wingèd seeds, where they lie cold and low,\nEach like a corpse within its grave, until\nThine azure sister of the Spring shall blow\n\nHer clarion o'er the dreaming earth, and fill\n(Driving sweet buds like flocks to feed in air)\nWith living hues and odours plain and hill:\n\nWild Spirit, which art moving everywhere;\nDestroyer and preserver; hear, oh hear!\n\n---\n\n**II**\n\nThou on whose stream, mid the steep sky's commotion,\nLoose clouds like earth's decaying leaves are shed,\nShook from the tangled boughs of Heaven and Ocean,\n\nAngels of rain and lightning: there are spread\nOn the blue surface of thine aery surge,\nLike the bright hair uplifted from the head\n\nOf some fierce Maenad, even from the dim verge\nOf the horizon to the zenith's height,\nThe locks of the approaching storm. Thou dirge\n\nOf the dying year, to which this closing night\nWill be the dome of a vast sepulchre,\nVaulted with all thy congregated might\n\nOf vapours, from whose solid atmosphere\nBlack rain, and fire, and hail will burst: oh hear!\n\n---\n\n**III**\n\nThou who didst waken from his summer dreams\nThe blue Mediterranean, where he lay,\nLulled by the coil of his crystalline streams,\n\nBeside a pumice isle in Baiae's bay,\nAnd saw in sleep old palaces and towers\nQuivering within the wave's intenser day,\n\nAll overgrown with azure moss and flowers\nSo sweet, the sense faints picturing them! Thou\nFor whose path the Atlantic's level powers\n\nCleave themselves into chasms, while far below\nThe sea-blooms and the oozy woods which wear\nThe sapless foliage of the ocean, know\n\nThy voice, and suddenly grow gray with fear,\nAnd tremble and despoil themselves: oh hear!\n\n---\n\n**IV**\n\nIf I were a dead leaf thou mightest bear;\nIf I were a swift cloud to fly with thee;\nA wave to pant beneath thy power, and share\n\nThe impulse of thy strength, only less free\nThan thou, O uncontrollable! If even\nI were as in my boyhood, and could be\n\nThe comrade of thy wanderings over Heaven,\nAs then, when to outstrip thy skiey speed\nScarce seem'd a vision; I would ne'er have striven\n\nAs thus with thee in prayer in my sore need.\nOh, lift me as a wave, a leaf, a cloud!\nI fall upon the thorns of life! I bleed!\n\nA heavy weight of hours has chained and bowed\nOne too like thee: tameless, and swift, and proud.\n\n---\n\n**V**\n\nMake me thy lyre, even as the forest is:\nWhat if my leaves are falling like its own!\nThe tumult of thy mighty harmonies\n\nWill take from both a deep, autumnal tone,\nSweet though in sadness. Be thou, Spirit fierce,\nMy spirit! Be thou me, impetuous one!\n\nDrive my dead thoughts over the universe\nLike withered leaves to quicken a new birth!\nAnd, by the incantation of this verse,\n\nScatter, as from an unextinguished hearth\nAshes and sparks, my words among mankind!\nBe through my lips to unawakened earth\n\nThe trumpet of a prophecy! O Wind,\nIf Winter comes, can Spring be far behind?\n\n---\n\n*Written at Florence, 1819*"

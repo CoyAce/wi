@@ -342,7 +342,7 @@ func (w *reliableWriter) listen() error {
 	return nil
 }
 
-func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, packets []ReliableReq) {
+func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, packets []ReliableReq) error {
 	var (
 		rck       = make(chan uint32, rckChanSize)
 		last      = uint32(len(packets))
@@ -370,13 +370,13 @@ func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, pa
 		select {
 		case r := <-rck:
 			if r > last {
-				return
+				return nil
 			}
 			packets = slices.DeleteFunc(packets, func(packet ReliableReq) bool {
 				return packet.Block < r
 			})
 			if len(packets) == 0 {
-				return
+				return nil
 			}
 			if packets[0].Block == r {
 				log.Printf("resend packet %v", r)
@@ -387,6 +387,7 @@ func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, pa
 			log.Printf("fin %v timeout", cacheKey.Block)
 		}
 	}
+	return errors.New("exhausted retries")
 }
 
 func (w *reliableWriter) rck(addr net.Addr, UUID string, block uint32, reqID uint32) {
@@ -397,13 +398,13 @@ func (w *reliableWriter) rck(addr net.Addr, UUID string, block uint32, reqID uin
 	}
 }
 
-func (w *reliableWriter) receive(addr net.Addr, req ReliableReq) {
+func (w *reliableWriter) receive(addr net.Addr, req ReliableReq, complete func(cacheKey CacheKey)) {
 	cacheKey := newCacheKey(req.UUID, req.ReqID)
 	w.multiple.Lock()
 	c, ok := w.req[cacheKey]
 	if !ok {
 		c = make(chan ReliableReq, 200)
-		go w.processReq(addr, cacheKey, c)
+		go w.processReq(addr, cacheKey, c, complete)
 		w.req[cacheKey] = c
 	}
 	w.multiple.Unlock()
@@ -435,6 +436,11 @@ func (b *reorderBuffer) sendTo(channel chan<- ReliableReq) {
 }
 
 func trySend(channel chan<- ReliableReq, item ReliableReq) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("send to ret channel failed: %v", r)
+		}
+	}()
 	select {
 	case channel <- item:
 	default:
@@ -485,7 +491,7 @@ func (b *reorderBuffer) clear() {
 	b.items = b.items[:0]
 }
 
-func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, reqChan chan ReliableReq) {
+func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, reqChan chan ReliableReq, complete func(cacheKey CacheKey)) {
 	finChan := w.loadOrStoreFIN(cacheKey)
 	retChan := w.loadOrStoreRET(cacheKey)
 	tracker := new(RangeTracker)
@@ -497,6 +503,9 @@ func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, reqChan ch
 		w.deleteFIN(cacheKey)
 		close(retChan)
 		timer.Stop()
+		if complete != nil && tracker.isCompleted() {
+			complete(cacheKey)
+		}
 	}()
 
 LOOP:
@@ -536,15 +545,14 @@ func (w *reliableWriter) handleIncomingRequest(
 	nextMissing := tracker.Next()
 
 	if nextMissing > incomingReq.Block {
-		// Received block is ahead of expected sequence
+		// Received block matches or fills the next missing sequence
 		trySend(retChan, incomingReq)
 		// Try to flush buffered blocks if there's a gap
 		if nextMissing != incomingReq.Block+1 {
 			buffer.flushUpTo(retChan, nextMissing-1)
 		}
 	} else {
-		// Received block matches or fills the next missing sequence
-		buffer.flushUpTo(retChan, nextMissing-1)
+		// Received block is ahead of expected sequence
 		buffer.insert(incomingReq)
 	}
 }

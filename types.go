@@ -46,6 +46,7 @@ const (
 	OpRck
 	OpFin
 	OpReq
+	OpLongText
 )
 
 var wrqSet = map[OpCode]bool{
@@ -133,6 +134,8 @@ func (op *OpCode) String() string {
 		return "FIN"
 	case OpReq:
 		return "REQ"
+	case OpLongText:
+		return "LongText"
 	}
 	return "unknown"
 }
@@ -1224,6 +1227,45 @@ func (c *ReqData) Unmarshal(p []byte) error {
 	return nil
 }
 
+type ReqSet []ReliableReq
+
+func (r *ReqSet) Marshal() ([]byte, error) {
+	size := len(*r) * DatagramSize
+	b := new(bytes.Buffer)
+	b.Grow(size)
+	for _, req := range *r {
+		p, err := req.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		b.Write(p)
+	}
+	return b.Bytes(), nil
+}
+
+func (r *ReqSet) Unmarshal(p []byte) error {
+	var (
+		err error
+		n   = len(p)
+		ret = make([]ReliableReq, 0, n/DatagramSize+1)
+	)
+	for i := 0; i < n; i += DatagramSize {
+		req := ReliableReq{ReqBody: new(ReqData)}
+		if i+DatagramSize > n {
+			if err = req.Unmarshal(p[i:]); err != nil {
+				return err
+			}
+		} else {
+			if err = req.Unmarshal(p[i : i+DatagramSize]); err != nil {
+				return err
+			}
+		}
+		ret = append(ret, req)
+	}
+	*r = ret
+	return nil
+}
+
 type ReliableReq struct {
 	ReqHeader
 	ReqBody
@@ -1358,6 +1400,73 @@ func (d *DiscoveryReq) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 	d.DiscoveryFlag = DiscoveryFlag(f)
+
+	return nil
+}
+
+type LongTextMessage struct {
+	CreatedAt int64
+	Sign      string
+	Text      string
+}
+
+func (l *LongTextMessage) Marshal() ([]byte, error) {
+	size := 2 + 8 + len(l.Sign) + 1 + len(l.Text) + 1
+	if size > DatagramSize {
+		return nil, errors.New("text is too long")
+	}
+	b := new(bytes.Buffer)
+	b.Grow(size)
+	err := binary.Write(b, binary.BigEndian, uint16(OpLongText)) // write operation code
+	if err != nil {
+		return nil, err
+	}
+
+	err = binary.Write(b, binary.BigEndian, l.CreatedAt) // write created at
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, l.Sign) // write sign
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeString(b, l.Text) // write text
+	if err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func (l *LongTextMessage) Unmarshal(p []byte) error {
+	var (
+		code OpCode
+		r    = bytes.NewBuffer(p)
+	)
+	err := binary.Read(r, binary.BigEndian, &code) // read operation code
+	if err != nil {
+		return InvalidData
+	}
+
+	if code != OpLongText {
+		return InvalidData
+	}
+
+	err = binary.Read(r, binary.BigEndian, &l.CreatedAt) // read created at
+	if err != nil {
+		return InvalidData
+	}
+
+	l.Sign, err = readString(r) // read sign
+	if err != nil {
+		return InvalidData
+	}
+
+	l.Text, err = readString(r) // read text
+	if err != nil {
+		return InvalidData
+	}
 
 	return nil
 }

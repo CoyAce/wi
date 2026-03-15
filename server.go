@@ -263,6 +263,45 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).patch(newCacheKey(rck.UUID, rck.ReqID), rck.Block)
 		}
+	case OpReq:
+		req := ReliableReq{ReqBody: new(LongTextMessage)}
+		if req.Unmarshal(pkt) != nil {
+			return
+		}
+		if p, ok := s.addrToPeer.Load(addr.String()); ok {
+			p.(Peer).receive(addr, req, func(cacheKey CacheKey) {
+				retChan := p.(Peer).loadOrStoreRET(cacheKey)
+				reqs := make([]ReliableReq, 0)
+				for {
+					timer := time.After(10 * time.Second)
+					select {
+					case r, ok := <-retChan:
+						if !ok {
+							p.(Peer).deleteRET(cacheKey)
+							signBody := &SignBody{Sign: req.ReqBody.(*LongTextMessage).Sign, UUID: req.UUID}
+							s.ackedMultiRelay(signBody, reqs, cacheKey)
+							if buf, err := new(ReqSet(reqs)).Marshal(); err != nil {
+								log.Printf("req set marshal failed")
+							} else {
+								s.cache(signBody, cacheKey.Block, buf)
+							}
+							return
+						}
+						reqs = append(reqs, r)
+					case <-timer:
+						return
+					}
+				}
+			})
+		}
+	case OpFin:
+		fin := new(Fin)
+		if fin.Unmarshal(pkt) != nil {
+			return
+		}
+		if p, ok := s.addrToPeer.Load(addr.String()); ok {
+			p.(Peer).finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+		}
 	default:
 		var (
 			rrq  ReadReq
@@ -450,7 +489,18 @@ func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
 		if !ok {
 			continue
 		}
-		s.dispatch(addr, p.([]byte), pr.UUID, i)
+		data := p.([]byte)
+		code := OpCode(binary.BigEndian.Uint16(data[:2]))
+		if code == OpReq {
+			reqs := new(ReqSet)
+			err := reqs.Unmarshal(data)
+			if err != nil {
+				log.Printf("req set unmarshal failed: %v", err)
+			}
+			s.dispatchInOrder(addr, *reqs, newCacheKey(pr.UUID, i))
+		} else {
+			s.dispatch(addr, data, pr.UUID, i)
+		}
 	}
 }
 
@@ -664,9 +714,27 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 	})
 }
 
+func (s *Server) ackedMultiRelay(sign *SignBody, packets []ReliableReq, cacheKey CacheKey) {
+	s.addrToPeer.Range(func(key, value interface{}) bool {
+		p := value.(Peer)
+		if p.Sign == sign.Sign && p.UUID != sign.UUID {
+			// use goroutine to avoid blocking by slow connection
+			addr, err := net.ResolveUDPAddr("udp", key.(string))
+			if err != nil {
+				return true
+			}
+			go s.dispatchInOrder(addr, packets, cacheKey)
+		}
+		return true
+	})
+}
+
 func (s *Server) dispatchInOrder(addr net.Addr, packets []ReliableReq, cacheKey CacheKey) {
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		v.(Peer).reliableMultiWrite(addr, cacheKey, packets)
+		if err := v.(Peer).reliableMultiWrite(addr, cacheKey, packets); err != nil {
+			log.Printf("[%v] dispatch in order failed: %v", addr.String(), err)
+		}
+
 	}
 }
 

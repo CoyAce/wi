@@ -658,9 +658,32 @@ func (c *Client) SendText(text string) error {
 	msg := SignedMessage{SignReq: SignReq{Block: c.nextID(), SignBody: SignBody{Sign: c.Sign, UUID: c.ID()}}, CreatedAt: time.Now().UnixMilli(), Payload: []byte(text)}
 	pkt, err := msg.Marshal()
 	if err != nil {
-		return err
+		return c.sendLongText(text)
 	}
 	return c.reliableWrite(pkt, msg.SignReq.Block)
+}
+
+func (c *Client) sendLongText(text string) error {
+	headerSize := 11 + len(c.ID()) + 12 + len(c.Sign)
+	reqID := c.nextID()
+	longTextReqs := c.toLongTextReqs(reqID, text, headerSize, c.Sign)
+	return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.UUID, reqID), longTextReqs)
+}
+
+func (c *Client) toLongTextReqs(reqID uint32, text string, headerSize int, sign string) []ReliableReq {
+	createdAt := time.Now()
+	maxSize := DatagramSize - headerSize
+	ret := make([]ReliableReq, 0, 20)
+
+	for i, cnt := 0, 1; i < len(text); i, cnt = i+maxSize, cnt+1 {
+		header := ReqHeader{uint32(cnt), reqID, c.ID()}
+		if i+maxSize > len(text) {
+			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i:]}})
+		} else {
+			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i : i+maxSize]}})
+		}
+	}
+	return ret
 }
 
 func (c *Client) SyncName(oldUUID string) {
@@ -885,6 +908,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
 		ack   Ack
 		nck   Nck
+		rck   Rck
 		fin   Fin
 		msg   SignedMessage
 		data  Data
@@ -987,13 +1011,43 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			tracker.Track(r)
 		}
 	case req.Unmarshal(buf) == nil:
-		c.receive(addr, req)
+		if OpCode(binary.BigEndian.Uint16((*req.ReqBody.(*ReqData))[:2])) == OpLongText {
+			c.receive(addr, req, c.receiveLongText)
+		} else {
+			c.receive(addr, req, nil)
+		}
 	case fin.Unmarshal(buf) == nil:
 		c.finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+	case rck.Unmarshal(buf) == nil:
+		c.patch(newCacheKey(rck.UUID, rck.ReqID), rck.Block)
 	default:
 		code := OpCode(binary.BigEndian.Uint16(buf[:2]))
 		log.Printf("unknown pkt, %v, %v", code.String(), buf)
 	}
+}
+
+func (c *Client) receiveLongText(cacheKey CacheKey) {
+	var l LongTextMessage
+	retChan := c.loadOrStoreRET(cacheKey)
+	s := strings.Builder{}
+	for {
+		timer := time.After(10 * time.Second)
+		select {
+		case r, ok := <-retChan:
+			if !ok {
+				c.deleteRET(cacheKey)
+				c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, SignBody{l.Sign, cacheKey.UUID}}, l.CreatedAt, []byte(s.String())}
+				return
+			}
+			if err := l.Unmarshal(*r.ReqBody.(*ReqData)); err != nil {
+				log.Printf("long text unmarshal failed: %v", err)
+			}
+			s.Write([]byte(l.Text))
+		case <-timer:
+			return
+		}
+	}
+	return
 }
 
 func (c *Client) dup(UUID string, block uint32) (dup bool) {
