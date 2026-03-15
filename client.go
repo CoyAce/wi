@@ -696,6 +696,7 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 		select {
 		case req, ok := <-resp:
 			if !ok {
+				c.deleteRET(key)
 				return ret, nil
 			}
 			if err := discoveryResp.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {

@@ -224,6 +224,17 @@ func (r *RangeTracker) Track(rg Range) {
 	r.latestBlock = rg.end
 }
 
+// Next returns the minimum missing packet
+func (r *RangeTracker) Next() uint32 {
+	r.rwLock.RLock()
+	defer r.rwLock.RUnlock()
+	ranges := r.Get()
+	if len(r.ranges) == 0 {
+		return r.nextBlock()
+	}
+	return ranges[0].start
+}
+
 // Contains return true if rg is not missing.
 func (r *RangeTracker) Contains(rg Range) bool {
 	r.rwLock.RLock()

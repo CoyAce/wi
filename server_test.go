@@ -11,7 +11,6 @@ import (
 	"net"
 	"os"
 	"reflect"
-	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -595,8 +594,6 @@ func TestDiscovery(t *testing.T) {
 		t.Errorf("expected %v users; actual %d", cnt+1, len(ret))
 	}
 	users := s.collectUsers("default", Online)
-	sort.Strings(users)
-	sort.Strings(ret)
 	if !reflect.DeepEqual(users, ret) {
 		t.Errorf("expected %v; actual %v", len(users), len(ret))
 	}

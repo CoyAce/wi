@@ -25,6 +25,26 @@ func TestSyncMap(t *testing.T) {
 	}
 }
 
+func TestChan(t *testing.T) {
+	ret := make(chan int, 1)
+	ret <- 1
+	select {
+	case ret <- 2:
+		t.Error("unreachable")
+	default:
+	}
+	close(ret)
+	select {
+	case v, ok := <-ret:
+		if !ok {
+			t.Error("expected ok")
+		}
+		if v != 1 {
+			t.Error("expected 1")
+		}
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	timeout := 5 * time.Second
 	elapsed := 200 * time.Millisecond

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -66,7 +67,7 @@ func (s *single) deleteACKAndRetry(cacheKey CacheKey) {
 func (s *single) complete(cacheKey CacheKey) {
 	s.RLock()
 	defer s.RUnlock()
-	if ackFunc, ok := s.ackFunc[cacheKey]; ok {
+	if ackFunc, ok := s.ackFunc[cacheKey]; ok && ackFunc != nil {
 		ackFunc()
 	}
 }
@@ -164,20 +165,26 @@ func (m *multiple) patch(cacheKey CacheKey, block uint32) {
 }
 
 func (m *multiple) finish(cacheKey CacheKey, block uint32) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("send to fin channel failed: %v", r)
+		}
+	}()
 	m.loadOrStoreFIN(cacheKey) <- block
 }
 
 func newBlockManager() *blockManager {
+	const initialCapacity = 64
 	return &blockManager{
 		single{
-			ackFunc: make(map[CacheKey]context.CancelFunc),
-			retry:   make(map[CacheKey]chan struct{}),
+			ackFunc: make(map[CacheKey]context.CancelFunc, initialCapacity),
+			retry:   make(map[CacheKey]chan struct{}, initialCapacity),
 		},
 		multiple{
-			rck: make(map[CacheKey]chan uint32),
-			fin: make(map[CacheKey]chan uint32),
-			req: make(map[CacheKey]chan ReliableReq),
-			ret: make(map[CacheKey]chan ReliableReq),
+			rck: make(map[CacheKey]chan uint32, initialCapacity),
+			fin: make(map[CacheKey]chan uint32, initialCapacity),
+			req: make(map[CacheKey]chan ReliableReq, initialCapacity),
+			ret: make(map[CacheKey]chan ReliableReq, initialCapacity),
 		},
 	}
 }
@@ -202,8 +209,8 @@ func (c *connManager) reliableWriteTo(addr net.Addr, data []byte, block uint32) 
 }
 
 type RTO struct {
-	minRTT     time.Duration // 观察到的最小RTT
-	rttVar     time.Duration // RTT变化
+	minRTT     time.Duration // minimum observed RTT
+	rttVar     time.Duration // RTT variance
 	rto        atomic.Int64
 	lastUpdate time.Time
 }
@@ -211,8 +218,8 @@ type RTO struct {
 func (r *RTO) Update(start time.Time) {
 	rtt := time.Since(start)
 
-	// 更新最小RTT (10分钟窗口)
-	if rtt < r.minRTT || time.Now().Sub(r.lastUpdate) > 10*time.Minute {
+	// Update minimum RTT (10 minute window)
+	if rtt < r.minRTT || time.Since(r.lastUpdate) > 10*time.Minute {
 		r.minRTT = rtt
 		r.lastUpdate = time.Now()
 	}
@@ -336,12 +343,12 @@ func (w *reliableWriter) listen() error {
 
 func (w *reliableWriter) reliableMultiWrite(addr net.Addr, cacheKey CacheKey, packets []ReliableReq) {
 	var (
-		rck       = make(chan uint32)
+		rck       = make(chan uint32, rckChanSize)
 		last      = uint32(len(packets))
 		finPkt, _ = new(Fin{ReqHeader{UUID: cacheKey.UUID, ReqID: cacheKey.Block, Block: last}}).Marshal()
 		send      = func(packet ReliableReq) {
 			if data, err := packet.Marshal(); err != nil {
-				log.Printf("[%v] marshal failed: %v", new(OpReq).String(), err)
+				log.Printf("[%v] marshal failed: %v", opReqString, err)
 			} else if err = w.writeTo(addr, data); err != nil {
 				bodyOffset := 2 + 4 + 4 + len(packet.UUID) + 1
 				code := new(OpCode(binary.BigEndian.Uint16(data[bodyOffset : bodyOffset+2]))).String()
@@ -402,42 +409,141 @@ func (w *reliableWriter) receive(addr net.Addr, req ReliableReq) {
 	c <- req
 }
 
-func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, req chan ReliableReq) {
-	fin := w.loadOrStoreFIN(cacheKey)
-	ret := w.loadOrStoreRET(cacheKey)
-	defer w.deleteREQ(cacheKey)
-	defer w.deleteFIN(cacheKey)
+const (
+	requestTimeout     = 10 * time.Second
+	pendingBufCapacity = 16
+	opReqString        = "REQ"
+	rckChanSize        = 1
+)
+
+// reorderBuffer manages out-of-order request buffering
+type reorderBuffer struct {
+	items []ReliableReq
+}
+
+func newReorderBuffer() *reorderBuffer {
+	return &reorderBuffer{
+		items: make([]ReliableReq, 0, pendingBufCapacity),
+	}
+}
+
+func (b *reorderBuffer) sendTo(channel chan<- ReliableReq) {
+	for _, item := range b.items {
+		trySend(channel, item)
+	}
+}
+
+func trySend(channel chan<- ReliableReq, item ReliableReq) {
+	select {
+	case channel <- item:
+	default:
+		log.Printf("[%v] ret channel full, drop", opReqString)
+	}
+}
+
+func (b *reorderBuffer) flushUpTo(channel chan<- ReliableReq, maxBlock uint32) {
+	if len(b.items) == 0 {
+		return
+	}
+
+	splitIdx := 0
+	for i, item := range b.items {
+		if item.Block <= maxBlock {
+			trySend(channel, item)
+			splitIdx = i + 1
+		} else {
+			break
+		}
+	}
+
+	if splitIdx == len(b.items) {
+		// All items flushed, clear to release memory
+		b.clear()
+	} else {
+		// Keep remaining items
+		b.items = b.items[splitIdx:]
+	}
+}
+
+func (b *reorderBuffer) insert(r ReliableReq) {
+	if len(b.items) == 0 {
+		b.items = append(b.items, r)
+		return
+	}
+	idx := sort.Search(len(b.items), func(i int) bool {
+		return b.items[i].Block > r.Block
+	})
+	if idx == len(b.items) {
+		b.items = append(b.items, r)
+	} else {
+		b.items = slices.Insert(b.items, idx, r)
+	}
+}
+
+func (b *reorderBuffer) clear() {
+	b.items = b.items[:0]
+}
+
+func (w *reliableWriter) processReq(addr net.Addr, cacheKey CacheKey, reqChan chan ReliableReq) {
+	finChan := w.loadOrStoreFIN(cacheKey)
+	retChan := w.loadOrStoreRET(cacheKey)
+	tracker := new(RangeTracker)
+	buffer := newReorderBuffer()
+	timer := time.NewTimer(requestTimeout)
+
 	defer func() {
-		w.deleteRET(cacheKey)
-		close(ret)
+		w.deleteREQ(cacheKey)
+		w.deleteFIN(cacheKey)
+		close(retChan)
+		timer.Stop()
 	}()
-	rt := new(RangeTracker)
+
 LOOP:
 	for {
-		timer := time.After(10 * time.Second)
+		timer.Reset(requestTimeout)
 		select {
-		case d := <-req:
-			r := MonoRange(d.Block)
-			if rt.Contains(r) {
-				continue
-			}
-			rt.Track(r)
-			ret <- d
-		case finBlock := <-fin:
-			rt.Track(MonoRange(finBlock + 1))
-			var next uint32
-			if rt.isCompleted() {
-				next = finBlock + 1
-			} else {
-				next = rt.Get()[0].start
-			}
-			w.rck(addr, cacheKey.UUID, next, cacheKey.Block)
-			if rt.isCompleted() {
+		case incomingReq := <-reqChan:
+			w.handleIncomingRequest(incomingReq, tracker, buffer, retChan)
+
+		case finBlock := <-finChan:
+			nextMissing := tracker.Next()
+			buffer.flushUpTo(retChan, nextMissing-1)
+			w.rck(addr, cacheKey.UUID, nextMissing, cacheKey.Block)
+			if nextMissing > finBlock {
 				break LOOP
 			}
-		case <-timer:
+
+		case <-timer.C:
+			log.Printf("[%v] %v timeout", new(OpReq).String(), cacheKey)
 			return
 		}
 	}
 	log.Printf("[%v] %v completed", new(OpReq).String(), cacheKey)
+}
+
+func (w *reliableWriter) handleIncomingRequest(
+	incomingReq ReliableReq,
+	tracker *RangeTracker,
+	buffer *reorderBuffer,
+	retChan chan<- ReliableReq,
+) {
+	blockRange := MonoRange(incomingReq.Block)
+	if tracker.Contains(blockRange) {
+		return // duplicate, skip
+	}
+	tracker.Track(blockRange)
+	nextMissing := tracker.Next()
+
+	if nextMissing > incomingReq.Block {
+		// Received block is ahead of expected sequence
+		trySend(retChan, incomingReq)
+		// Try to flush buffered blocks if there's a gap
+		if nextMissing != incomingReq.Block+1 {
+			buffer.flushUpTo(retChan, nextMissing-1)
+		}
+	} else {
+		// Received block matches or fills the next missing sequence
+		buffer.flushUpTo(retChan, nextMissing-1)
+		buffer.insert(incomingReq)
+	}
 }
