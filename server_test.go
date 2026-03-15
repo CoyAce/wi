@@ -398,6 +398,7 @@ func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
 	sender.SignIn()
+	time.Sleep(1 * time.Millisecond)
 	_, err := server.parseAddrByUUID(sender.ID())
 	if err != nil {
 		t.Fatal(err)
