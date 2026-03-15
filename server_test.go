@@ -661,10 +661,10 @@ func TestMultiWrite(t *testing.T) {
 	c.SignIn()
 	key := newCacheKey(c.ID(), 1)
 	if v, ok := s.addrToPeer.Load(c.conn.LocalAddr().String()); ok {
-		rck := make(chan uint32)
-		v.(Peer).storeRCK(key, rck)
+		sack := make(chan uint32)
+		v.(Peer).storeSACK(key, sack)
 		header := ReqHeader{Block: 1, ReqID: key.Block, UUID: key.UUID}
-		data, err := new(ReliableReq{header, new(ReqData("hello"))}).Marshal()
+		data, err := new(ReliableReq{ReqHeader: header, ReqBody: new(ReqData("hello"))}).Marshal()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -672,7 +672,7 @@ func TestMultiWrite(t *testing.T) {
 		time.Sleep(1 * time.Millisecond)
 		finPkt, _ := new(Fin{header}).Marshal()
 		_ = v.(Peer).writeTo(c.conn.LocalAddr(), finPkt)
-		r := <-rck
+		r := <-sack
 		if r != 2 {
 			t.Errorf("expected 2; actual %d", r)
 		}

@@ -254,14 +254,14 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		s.sendUsers(drq, addr)
-	case OpRck:
-		var rck Rck
-		if rck.Unmarshal(pkt) != nil {
+	case OpSack:
+		var sack Sack
+		if sack.Unmarshal(pkt) != nil {
 			return
 		}
-		log.Printf("rck received: %v", rck)
+		log.Printf("sack received: %v", sack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).patch(newCacheKey(rck.UUID, rck.ReqID), rck.Block)
+			p.(Peer).notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 		}
 	case OpReq:
 		req := ReliableReq{ReqBody: new(LongTextMessage)}
@@ -300,7 +300,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+			p.(Peer).notifyFIN(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 		}
 	default:
 		var (
@@ -392,12 +392,13 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		headerSize := 11 + len(v.(Peer).UUID)
+		headerSize := 12 + len(v.(Peer).UUID)
 		resp := s.toDiscoveryResp(users, headerSize)
 		packets := make([]ReliableReq, 0, len(resp))
 		for i, d := range resp {
-			packets = append(packets, ReliableReq{ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, &d})
+			packets = append(packets, ReliableReq{ReqHeader: ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, ReqBody: &d})
 		}
+		packets[len(packets)-1].IsFinal = true
 		s.dispatchInOrder(addr, packets, newCacheKey(v.(Peer).UUID, drq.Block))
 	}
 }

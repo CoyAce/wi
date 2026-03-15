@@ -664,7 +664,7 @@ func (c *Client) SendText(text string) error {
 }
 
 func (c *Client) sendLongText(text string) error {
-	headerSize := 11 + len(c.ID()) + 12 + len(c.Sign)
+	headerSize := 12 + len(c.ID()) + 12 + len(c.Sign)
 	reqID := c.nextID()
 	longTextReqs := c.toLongTextReqs(reqID, text, headerSize, c.Sign)
 	return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.UUID, reqID), longTextReqs)
@@ -677,10 +677,11 @@ func (c *Client) toLongTextReqs(reqID uint32, text string, headerSize int, sign 
 
 	for i, cnt := 0, 1; i < len(text); i, cnt = i+maxSize, cnt+1 {
 		header := ReqHeader{uint32(cnt), reqID, c.ID()}
-		if i+maxSize > len(text) {
-			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i:]}})
+		isFinal := i+maxSize >= len(text) // Last packet
+		if isFinal {
+			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i:]}, true})
 		} else {
-			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i : i+maxSize]}})
+			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i : i+maxSize]}, false})
 		}
 	}
 	return ret
@@ -908,7 +909,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	var (
 		ack   Ack
 		nck   Nck
-		rck   Rck
+		sack  Sack
 		fin   Fin
 		msg   SignedMessage
 		data  Data
@@ -999,7 +1000,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case ec.Unmarshal(buf) == nil:
 		if ec == ErrUnknownUser {
 			c.SignIn()
-			c.retryNow()
+			c.triggerAllRetries()
 		}
 	case ctrl.Unmarshal(buf) == nil:
 		c.ack(addr, ctrl.UUID, ctrl.Block)
@@ -1017,9 +1018,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.receive(addr, req, nil)
 		}
 	case fin.Unmarshal(buf) == nil:
-		c.finish(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
-	case rck.Unmarshal(buf) == nil:
-		c.patch(newCacheKey(rck.UUID, rck.ReqID), rck.Block)
+		c.notifyFIN(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+	case sack.Unmarshal(buf) == nil:
+		c.notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 	default:
 		code := OpCode(binary.BigEndian.Uint16(buf[:2]))
 		log.Printf("unknown pkt, %v, %v", code.String(), buf)

@@ -43,7 +43,7 @@ const (
 	OpReply
 	OpDiscovery
 	OpDiscoveryResp
-	OpRck
+	OpSack
 	OpFin
 	OpReq
 	OpLongText
@@ -128,8 +128,8 @@ func (op *OpCode) String() string {
 		return "Discovery"
 	case OpDiscoveryResp:
 		return "DiscoveryResp"
-	case OpRck:
-		return "RCK"
+	case OpSack:
+		return "SACK"
 	case OpFin:
 		return "FIN"
 	case OpReq:
@@ -785,26 +785,26 @@ func (c *Check) Unmarshal(p []byte) error {
 	return nil
 }
 
-type Rck struct {
+type Sack struct {
 	ReqHeader
 }
 
-func (r *Rck) ID() uint32 {
-	return r.Block
+func (s *Sack) ID() uint32 {
+	return s.Block
 }
 
-func (r *Rck) Marshal() ([]byte, error) {
-	size := 2 + 4 + 4 + len(r.UUID) + 1 // operation code  + block number + req id + uuid
+func (s *Sack) Marshal() ([]byte, error) {
+	size := 2 + 4 + 4 + len(s.UUID) + 1 // operation code  + block number + req id + uuid
 
 	b := new(bytes.Buffer)
 	b.Grow(size)
 
-	err := binary.Write(b, binary.BigEndian, uint16(OpRck)) // write operation code
+	err := binary.Write(b, binary.BigEndian, uint16(OpSack)) // write operation code
 	if err != nil {
 		return nil, err
 	}
 
-	err = r.ReqHeader.Marshal(b) // write header
+	err = s.ReqHeader.Marshal(b) // write header
 	if err != nil {
 		return nil, err
 	}
@@ -812,7 +812,7 @@ func (r *Rck) Marshal() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-func (r *Rck) Unmarshal(p []byte) error {
+func (s *Sack) Unmarshal(p []byte) error {
 	var code OpCode
 	b := bytes.NewBuffer(p)
 
@@ -821,11 +821,11 @@ func (r *Rck) Unmarshal(p []byte) error {
 		return InvalidData
 	}
 
-	if code != OpRck {
+	if code != OpSack {
 		return InvalidData
 	}
 
-	return r.ReqHeader.Unmarshal(b)
+	return s.ReqHeader.Unmarshal(b)
 }
 
 type Ack struct {
@@ -1269,10 +1269,11 @@ func (r *ReqSet) Unmarshal(p []byte) error {
 type ReliableReq struct {
 	ReqHeader
 	ReqBody
+	IsFinal bool // true if this is the last packet (piggybacks FIN)
 }
 
 func (r *ReliableReq) HeaderSize() int {
-	return 2 + 4 + 4 + len(r.UUID) + 1
+	return 2 + 4 + 4 + len(r.UUID) + 1 + 1 // +1 for IsFinal flag
 }
 
 func (r *ReliableReq) Marshal() ([]byte, error) {
@@ -1288,6 +1289,10 @@ func (r *ReliableReq) Marshal() ([]byte, error) {
 		return nil, err
 	}
 	err = r.ReqHeader.Marshal(b) // write header
+	if err != nil {
+		return nil, err
+	}
+	err = b.WriteByte(boolToUint(r.IsFinal)) // Write IsFinal flag
 	if err != nil {
 		return nil, err
 	}
@@ -1316,6 +1321,12 @@ func (r *ReliableReq) Unmarshal(p []byte) error {
 	if err != nil {
 		return InvalidData
 	}
+
+	isFinalByte, err := b.ReadByte() // Read IsFinal flag
+	if err != nil {
+		return InvalidData
+	}
+	r.IsFinal = isFinalByte != 0
 
 	err = r.ReqBody.Unmarshal(b.Bytes()) // read body
 	if err != nil {
@@ -1612,3 +1623,10 @@ var (
 	InvalidRRQ  = errors.New("invalid RRQ")
 	InvalidWRQ  = errors.New("invalid WRQ")
 )
+
+func boolToUint(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
+}
