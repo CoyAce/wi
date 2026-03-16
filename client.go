@@ -1017,7 +1017,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.receive(addr, req, nil)
 		}
 	case fin.Unmarshal(buf) == nil:
-		c.notifyFIN(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+		c.notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	case sack.Unmarshal(buf) == nil:
 		c.notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 	default:

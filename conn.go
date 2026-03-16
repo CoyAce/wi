@@ -269,16 +269,6 @@ func (m *multiple) notifySACK(key CacheKey, block uint32) {
 	}
 }
 
-// notifyFIN sends FIN notification for transfer completion.
-// Uses non-blocking send to avoid blocking on full channel.
-func (m *multiple) notifyFIN(key CacheKey, block uint32) {
-	m.RLock()
-	defer m.RUnlock()
-	if ch, ok := m.fin[key]; ok {
-		nonBlockingSend(ch, block)
-	}
-}
-
 // ============================================================================
 // RTO Implementation (Adaptive Timeout Calculation)
 // ============================================================================
@@ -298,6 +288,7 @@ func (r *RTO) Update(startTime time.Time) {
 		r.lastUpdate = time.Now()
 	}
 
+	log.Printf("minRTT: %dms, rttVar: %dms, RTO: %dms", r.minRTT/time.Millisecond, r.rttVar/time.Millisecond, r.Get()/time.Millisecond)
 	// EWMA calculation for RTT variance
 	r.rttVar = r.rttVar*3/4 + (rtt-r.minRTT)/4
 
@@ -322,7 +313,6 @@ func (r *RTO) Increase() {
 	}
 
 	r.rto.Store(increased)
-	r.rttVar += r.rttVar / 4
 }
 
 // Get returns current RTO value for timeout scheduling.
@@ -597,16 +587,15 @@ func (w *reliableWriter) reliableMultiWrite(
 
 	// Wait for SACK with retries
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
-		timer := time.NewTimer(w.RTO.Get())
+		timer := time.After(w.RTO.Get())
 		select {
 		case block := <-sackCh:
-			timer.Stop()
 			if block >= finBlock {
 				return nil // All acknowledged
 			}
 			// Partial acknowledgment, continue waiting
 
-		case <-timer.C:
+		case <-timer:
 			log.Printf("SACK timeout, cache key: %v, retrying...", cacheKey)
 			w.RTO.Increase()
 		}
@@ -617,6 +606,19 @@ func (w *reliableWriter) reliableMultiWrite(
 	}
 
 	return errors.New("exhausted retries for FIN")
+}
+
+// notifyFIN sends FIN notification for transfer completion.
+// Uses non-blocking send to avoid blocking on full channel.
+func (w *reliableWriter) notifyFIN(addr net.Addr, key CacheKey, block uint32) {
+	w.multiple.RLock()
+	defer w.multiple.RUnlock()
+
+	if ch, ok := w.fin[key]; ok {
+		nonBlockingSend(ch, block)
+	} else {
+		w.sack(addr, key.UUID, key.Block, block+1)
+	}
 }
 
 // ============================================================================
@@ -707,7 +709,7 @@ LOOP:
 			}
 			nextMissing := tracker.Next()
 			buffer.flushUpTo(retCh, nextMissing-1)
-			w.sack(addr, cacheKey.UUID, nextMissing, cacheKey.Block)
+			w.sack(addr, cacheKey.UUID, cacheKey.Block, nextMissing)
 
 			if nextMissing > finBlock {
 				break LOOP
@@ -762,7 +764,7 @@ func (w *reliableWriter) handleIncomingRequest(
 
 // sack sends SACK acknowledgment to receiver.
 // Used to notify sender about received packets during multi-packet transfer.
-func (w *reliableWriter) sack(addr net.Addr, uuid string, block uint32, reqID uint32) {
+func (w *reliableWriter) sack(addr net.Addr, uuid string, reqID uint32, block uint32) {
 	sack := Sack{
 		ReqHeader{
 			Block: block,

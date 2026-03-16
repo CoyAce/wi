@@ -277,7 +277,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).notifyFIN(newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+			p.(Peer).notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 		}
 	default:
 		var (
