@@ -297,33 +297,9 @@ func (r *RTO) Update(startTime time.Time) {
 	r.rto.Store(int64(min(newRTO, maxRTO)))
 }
 
-// Increase exponentially increases RTO on timeout with bounded growth.
-func (r *RTO) Increase() {
-	const (
-		maxRTO            = int64(3 * time.Second)
-		rtoIncreaseFactor = 108
-		rtoIncreaseBase   = int64(10 * time.Millisecond)
-	)
-
-	current := r.rto.Load()
-	increased := current*rtoIncreaseFactor/100 + rtoIncreaseBase
-
-	if increased > maxRTO {
-		increased = maxRTO
-	}
-
-	r.rto.Store(increased)
-}
-
 // Get returns current RTO value for timeout scheduling.
 func (r *RTO) Get() time.Duration {
 	return time.Duration(r.rto.Load())
-}
-
-func (r *RTO) GetAndLog() time.Duration {
-	v := r.Get()
-	log.Printf("current RTO: %dms", v/time.Millisecond)
-	return v
 }
 
 // ============================================================================
@@ -521,15 +497,14 @@ func (w *reliableWriter) reliableWrite(
 
 		// Wait for ACK, timeout, or manual retry
 	WAIT:
-		timer := time.After(w.RTO.GetAndLog())
+		timer := time.After(w.RTO.Get())
 		select {
 		case <-ctx.Done():
 			w.RTO.Update(startTime)
 			return nil
 
 		case <-timer:
-			w.RTO.Increase()
-			log.Printf("[%s] timeout, increasing RTO to %dms", code, w.RTO.Get()/time.Millisecond)
+			log.Printf("[%s] timeout, current RTO: %dms", code, w.RTO.Get()/time.Millisecond)
 			lastErr = errors.New("timeout waiting for ACK")
 
 		case <-retryCh:
@@ -606,7 +581,6 @@ func (w *reliableWriter) reliableMultiWrite(
 
 		case <-timer:
 			log.Printf("SACK timeout, cache key: %v, final block: %v, retrying...", cacheKey, finBlock)
-			w.RTO.Increase()
 		}
 		// Send FIN to signal completion
 		if err := w.writeTo(addr, finPkt); err != nil {
