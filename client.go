@@ -665,8 +665,12 @@ func (c *Client) SendText(text string) error {
 func (c *Client) sendLongText(text string) error {
 	headerSize := 12 + len(c.ID()) + 12 + len(c.Sign)
 	reqID := c.nextID()
-	longTextReqs := c.toLongTextReqs(reqID, text, headerSize, c.Sign)
-	return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.UUID, reqID), longTextReqs)
+	longTexts := c.toLongTextReqs(reqID, text, headerSize, c.Sign)
+	if packets, err := new(ReqSet(longTexts)).ToPackets(); err != nil {
+		return err
+	} else {
+		return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.UUID, reqID), packets)
+	}
 }
 
 func (c *Client) toLongTextReqs(reqID uint32, text string, headerSize int, sign string) []ReliableReq {

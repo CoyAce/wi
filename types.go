@@ -1237,6 +1237,33 @@ func (c *ReqData) Unmarshal(p []byte) error {
 
 type ReqSet []ReliableReq
 
+func (r *ReqSet) ToPackets() ([][]byte, error) {
+	packets := make([][]byte, 0, len(*r))
+	for _, req := range *r {
+		p, err := req.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		packets = append(packets, p)
+	}
+	return packets, nil
+}
+
+func ToPackets(p []byte) [][]byte {
+	var (
+		n   = len(p)
+		ret = make([][]byte, 0, n/DatagramSize+1)
+	)
+	for i := 0; i < n; i += DatagramSize {
+		if i+DatagramSize > n {
+			ret = append(ret, p[i:])
+		} else {
+			ret = append(ret, p[i:i+DatagramSize])
+		}
+	}
+	return ret
+}
+
 func (r *ReqSet) Marshal() ([]byte, error) {
 	size := len(*r) * DatagramSize
 	b := new(bytes.Buffer)

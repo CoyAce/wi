@@ -390,6 +390,11 @@ func (b *reorderBuffer) clear() {
 // Drops message if channel is full or closed.
 // Used for SACK/FIN/REQ notifications to avoid blocking sender.
 func nonBlockingSend[T any](ch chan T, value T) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("send to ret channel failed: %v", r)
+		}
+	}()
 	select {
 	case ch <- value:
 	default:
@@ -484,6 +489,7 @@ func (w *reliableWriter) reliableWrite(
 ) error {
 	var (
 		code      = new(toOpCode(data[:2])).String()
+		target    = addr.String()
 		lastErr   error
 		startTime time.Time // Declared outside loop to preserve timestamp across retries
 	)
@@ -492,6 +498,7 @@ func (w *reliableWriter) reliableWrite(
 		// Even attempts: send DATA, Odd attempts: send CHECK
 		if attempt%2 == 0 {
 			startTime = time.Now()
+			log.Printf("[%v] write data to [%v]", code, target)
 			if lastErr = w.writeTo(addr, data); lastErr != nil {
 				log.Printf("[%s] write failed: %v", code, lastErr)
 
@@ -502,6 +509,7 @@ func (w *reliableWriter) reliableWrite(
 			}
 		} else {
 			check := Check{Block: block}
+			log.Printf("[%v] check ack for [%v]", code, target)
 			if pkt, err := check.Marshal(); err != nil {
 				log.Printf("[%s] check marshal failed: %v", code, err)
 				continue
@@ -555,7 +563,7 @@ func (w *reliableWriter) reliableWrite(
 func (w *reliableWriter) reliableMultiWrite(
 	addr net.Addr,
 	cacheKey CacheKey,
-	packets []ReliableReq,
+	packets [][]byte,
 ) error {
 	const sackChanSize = 1
 	sackCh := make(chan uint32, sackChanSize)
@@ -563,7 +571,7 @@ func (w *reliableWriter) reliableMultiWrite(
 	defer w.deleteSACK(cacheKey)
 
 	// Prepare FIN packet
-	finBlock := packets[len(packets)-1].Block
+	finBlock := uint32(len(packets))
 	fin := Fin{
 		ReqHeader{
 			Block: finBlock,
@@ -578,9 +586,7 @@ func (w *reliableWriter) reliableMultiWrite(
 
 	// Send all packets
 	for _, pkt := range packets {
-		if data, err := pkt.Marshal(); err != nil {
-			log.Printf("packet marshal failed: %v", err)
-		} else if err = w.writeTo(addr, data); err != nil {
+		if err = w.writeTo(addr, pkt); err != nil {
 			log.Printf("packet write failed: %v", err)
 		}
 	}
@@ -590,13 +596,16 @@ func (w *reliableWriter) reliableMultiWrite(
 		timer := time.After(w.RTO.Get())
 		select {
 		case block := <-sackCh:
-			if block >= finBlock {
+			if block > finBlock {
 				return nil // All acknowledged
 			}
-			// Partial acknowledgment, continue waiting
+			log.Printf("resend packet %v", block)
+			if err = w.writeTo(addr, packets[block-1]); err != nil {
+				log.Printf("packet write failed: %v", err)
+			}
 
 		case <-timer:
-			log.Printf("SACK timeout, cache key: %v, retrying...", cacheKey)
+			log.Printf("SACK timeout, cache key: %v, final block: %v, retrying...", cacheKey, finBlock)
 			w.RTO.Increase()
 		}
 		// Send FIN to signal completion

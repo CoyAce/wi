@@ -398,9 +398,14 @@ func (s *Server) newReqHandler(p Peer, addr net.Addr, req ReliableReq) func(cach
 					}
 
 					signBody := &SignBody{Sign: longText.Sign, UUID: req.UUID}
-					s.ackedMultiRelay(signBody, reqs, cacheKey)
+					reqSet := new(ReqSet(reqs))
+					if packets, err := reqSet.ToPackets(); err != nil {
+						log.Printf("req set to packets failed: %v", err)
+					} else {
+						s.ackedMultiRelay(signBody, packets, cacheKey)
+					}
 
-					if buf, err := new(ReqSet(reqs)).Marshal(); err != nil {
+					if buf, err := reqSet.Marshal(); err != nil {
 						log.Printf("req set marshal failed: %v", err)
 					} else {
 						s.cache(signBody, cacheKey.Block, buf)
@@ -422,12 +427,16 @@ func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
 		headerSize := 12 + len(v.(Peer).UUID)
 		resp := s.toDiscoveryResp(users, headerSize)
-		packets := make([]ReliableReq, 0, len(resp))
+		reqs := make([]ReliableReq, 0, len(resp))
 		for i, d := range resp {
-			packets = append(packets, ReliableReq{ReqHeader: ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, ReqBody: &d})
+			reqs = append(reqs, ReliableReq{ReqHeader: ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, ReqBody: &d})
 		}
-		packets[len(packets)-1].IsFinal = true
-		s.dispatchInOrder(addr, packets, newCacheKey(v.(Peer).UUID, drq.Block))
+		reqs[len(reqs)-1].IsFinal = true
+		if packets, err := new(ReqSet(reqs)).ToPackets(); err != nil {
+			log.Printf("user reqs marshal failed: %v", err)
+		} else {
+			s.dispatchInOrder(addr, packets, newCacheKey(v.(Peer).UUID, drq.Block))
+		}
 	}
 }
 
@@ -520,12 +529,7 @@ func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
 		}
 		data := p.([]byte)
 		if toOpCode(data[:2]) == OpReq {
-			reqs := new(ReqSet)
-			err := reqs.Unmarshal(data)
-			if err != nil {
-				log.Printf("req set unmarshal failed: %v", err)
-			}
-			s.dispatchInOrder(addr, *reqs, newCacheKey(pr.UUID, i))
+			s.dispatchInOrder(addr, ToPackets(data), newCacheKey(pr.UUID, i))
 		} else {
 			s.dispatch(addr, data, pr.UUID, i)
 		}
@@ -742,7 +746,7 @@ func (s *Server) ackedRelay(sign *SignBody, block uint32, bytes []byte) {
 	})
 }
 
-func (s *Server) ackedMultiRelay(sign *SignBody, packets []ReliableReq, cacheKey CacheKey) {
+func (s *Server) ackedMultiRelay(sign *SignBody, packets [][]byte, cacheKey CacheKey) {
 	s.addrToPeer.Range(func(key, value interface{}) bool {
 		p := value.(Peer)
 		if p.Sign == sign.Sign && p.UUID != sign.UUID {
@@ -757,7 +761,7 @@ func (s *Server) ackedMultiRelay(sign *SignBody, packets []ReliableReq, cacheKey
 	})
 }
 
-func (s *Server) dispatchInOrder(addr net.Addr, packets []ReliableReq, cacheKey CacheKey) {
+func (s *Server) dispatchInOrder(addr net.Addr, packets [][]byte, cacheKey CacheKey) {
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
 		if err := v.(Peer).reliableMultiWrite(addr, cacheKey, packets); err != nil {
 			log.Printf("[%v] dispatch in order failed: %v", addr.String(), err)
