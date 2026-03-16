@@ -269,30 +269,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
-			p.(Peer).receive(addr, req, func(cacheKey CacheKey) {
-				retChan := p.(Peer).loadOrStoreRET(cacheKey)
-				reqs := make([]ReliableReq, 0)
-				for {
-					timer := time.After(10 * time.Second)
-					select {
-					case r, ok := <-retChan:
-						if !ok {
-							p.(Peer).deleteRET(cacheKey)
-							signBody := &SignBody{Sign: req.ReqBody.(*LongTextMessage).Sign, UUID: req.UUID}
-							s.ackedMultiRelay(signBody, reqs, cacheKey)
-							if buf, err := new(ReqSet(reqs)).Marshal(); err != nil {
-								log.Printf("req set marshal failed")
-							} else {
-								s.cache(signBody, cacheKey.Block, buf)
-							}
-							return
-						}
-						reqs = append(reqs, r)
-					case <-timer:
-						return
-					}
-				}
-			})
+			p.(Peer).receive(addr, req, s.newReqHandler(p.(Peer), addr, req))
 		}
 	case OpFin:
 		fin := new(Fin)
@@ -389,6 +366,57 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 }
 
+func (s *Server) newReqHandler(p Peer, addr net.Addr, req ReliableReq) func(cacheKey CacheKey) {
+	return func(cacheKey CacheKey) {
+		defer p.deleteRET(cacheKey)
+		retChan := p.loadOrStoreRET(cacheKey)
+
+		// Pre-allocate with reasonable capacity
+		reqs := make([]ReliableReq, 0, 16)
+
+		// Create timer once and reuse
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+
+		for {
+			// Reset timer for this iteration
+			timer.Reset(10 * time.Second)
+
+			select {
+			case r, ok := <-retChan:
+				if !ok {
+					if s.dup(addr.String(), cacheKey.Block) {
+						log.Printf("[Req] %v detected as duplicate", cacheKey)
+						return
+					}
+
+					// Safe type assertion
+					longText, ok := req.ReqBody.(*LongTextMessage)
+					if !ok {
+						log.Printf("[Req] invalid ReqBody type: expected *LongTextMessage, got %T", req.ReqBody)
+						return
+					}
+
+					signBody := &SignBody{Sign: longText.Sign, UUID: req.UUID}
+					s.ackedMultiRelay(signBody, reqs, cacheKey)
+
+					if buf, err := new(ReqSet(reqs)).Marshal(); err != nil {
+						log.Printf("req set marshal failed: %v", err)
+					} else {
+						s.cache(signBody, cacheKey.Block, buf)
+					}
+					return
+				}
+				reqs = append(reqs, r)
+
+			case <-timer.C:
+				log.Printf("[Req] %v timeout, discarding collected requests", cacheKey)
+				return
+			}
+		}
+	}
+}
+
 func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
@@ -430,7 +458,7 @@ func (s *Server) collectUsers(sign string, flag DiscoveryFlag) []string {
 }
 
 func (s *Server) collectOnlineUsers(sign string) []string {
-	uuids := make([]string, 0)
+	uuids := make([]string, 0, 16)
 	s.addrToPeer.Range(func(k, v interface{}) bool {
 		p := v.(Peer)
 		if p.Sign == sign {
@@ -442,7 +470,7 @@ func (s *Server) collectOnlineUsers(sign string) []string {
 }
 
 func (s *Server) collectActiveUsers(sign string) []string {
-	uuids := make([]string, 0)
+	uuids := make([]string, 0, 16)
 	hs := s.loadHistorySet(sign)
 	hs.Range(func(k, v interface{}) bool {
 		uuids = append(uuids, k.(string))

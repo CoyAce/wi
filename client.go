@@ -709,8 +709,9 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 		reqID         = c.nextID()
 		key           = newCacheKey(c.ID(), reqID)
 		resp          = c.loadOrStoreRET(key)
-		ret           = make([]string, 0)
+		ret           = make([]string, 0, 16)
 	)
+	defer c.deleteRET(key)
 	if err := c.send(&DiscoveryReq{Block: reqID, Sign: c.Sign, DiscoveryFlag: flag}); err != nil {
 		return nil, fmt.Errorf("discovery failed: %v", err)
 	}
@@ -719,7 +720,6 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 		select {
 		case req, ok := <-resp:
 			if !ok {
-				c.deleteRET(key)
 				return ret, nil
 			}
 			if err := discoveryResp.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {
@@ -768,7 +768,7 @@ func (c *Client) getUnknownUsers(hs *sync.Map) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	unknown := make([]string, 0)
+	unknown := make([]string, 0, 16)
 	for _, u := range users {
 		if _, ok := hs.Load(u); !ok && u != c.ID() {
 			unknown = append(unknown, u)
@@ -778,7 +778,7 @@ func (c *Client) getUnknownUsers(hs *sync.Map) ([]string, error) {
 }
 
 func (c *Client) getUsers(hs *sync.Map) []string {
-	users := make([]string, 0)
+	users := make([]string, 0, 16)
 	hs.Range(func(uuid, value interface{}) bool {
 		if uuid != c.ID() {
 			users = append(users, uuid.(string))
