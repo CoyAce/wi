@@ -669,7 +669,7 @@ func (c *Client) sendLongText(text string) error {
 	if packets, err := new(ReqSet(longTexts)).ToPackets(); err != nil {
 		return err
 	} else {
-		return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.UUID, reqID), packets)
+		return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.ID(), reqID), packets)
 	}
 }
 
