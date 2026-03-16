@@ -288,13 +288,14 @@ func (r *RTO) Update(startTime time.Time) {
 		r.lastUpdate = time.Now()
 	}
 
-	log.Printf("minRTT: %dms, rttVar: %dms, RTO: %dms", r.minRTT/time.Millisecond, r.rttVar/time.Millisecond, r.Get()/time.Millisecond)
 	// EWMA calculation for RTT variance
-	r.rttVar = r.rttVar*3/4 + (rtt-r.minRTT)/4
+	r.rttVar = min(r.rttVar*3/4+(rtt-r.minRTT)/4, r.minRTT)
 
 	// Calculate RTO: minRTT + 4*rttVar
 	newRTO := r.minRTT + 4*r.rttVar
 	r.rto.Store(int64(min(newRTO, maxRTO)))
+
+	log.Printf("minRTT: %dms, rttVar: %dms, RTO: %dms", r.minRTT/time.Millisecond, r.rttVar/time.Millisecond, r.Get()/time.Millisecond)
 }
 
 // Get returns current RTO value for timeout scheduling.
