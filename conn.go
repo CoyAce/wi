@@ -289,7 +289,10 @@ func (r *RTO) Update(startTime time.Time) {
 	rtt := time.Since(startTime)
 
 	// Update minimum RTT if needed
-	const rttWindow = 10 * time.Minute
+	const (
+		rttWindow = 10 * time.Minute
+		maxRTO    = 3 * time.Second
+	)
 	if rtt < r.minRTT || time.Since(r.lastUpdate) > rttWindow {
 		r.minRTT = rtt
 		r.lastUpdate = time.Now()
@@ -300,7 +303,7 @@ func (r *RTO) Update(startTime time.Time) {
 
 	// Calculate RTO: minRTT + 4*rttVar
 	newRTO := r.minRTT + 4*r.rttVar
-	r.rto.Store(int64(newRTO))
+	r.rto.Store(int64(min(newRTO, maxRTO)))
 }
 
 // Increase exponentially increases RTO on timeout with bounded growth.
@@ -325,6 +328,12 @@ func (r *RTO) Increase() {
 // Get returns current RTO value for timeout scheduling.
 func (r *RTO) Get() time.Duration {
 	return time.Duration(r.rto.Load())
+}
+
+func (r *RTO) GetAndLog() time.Duration {
+	v := r.Get()
+	log.Printf("current RTO: %dms", v/time.Millisecond)
+	return v
 }
 
 // ============================================================================
@@ -483,12 +492,13 @@ func (w *reliableWriter) reliableWrite(
 	data []byte,
 	block uint32,
 ) error {
-	code := new(toOpCode(data[:2])).String()
-	var lastErr error
+	var (
+		code      = new(toOpCode(data[:2])).String()
+		lastErr   error
+		startTime time.Time // Declared outside loop to preserve timestamp across retries
+	)
 
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
-		var startTime time.Time
-
 		// Even attempts: send DATA, Odd attempts: send CHECK
 		if attempt%2 == 0 {
 			startTime = time.Now()
@@ -513,21 +523,20 @@ func (w *reliableWriter) reliableWrite(
 
 		// Wait for ACK, timeout, or manual retry
 	WAIT:
-		timer := time.NewTimer(w.RTO.Get())
+		timer := time.After(w.RTO.GetAndLog())
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			w.RTO.Update(startTime)
 			return nil
 
-		case <-timer.C:
-			log.Printf("[%s] timeout, increasing RTO", code)
+		case <-timer:
 			w.RTO.Increase()
+			log.Printf("[%s] timeout, increasing RTO to %dms", code, w.RTO.Get()/time.Millisecond)
 			lastErr = errors.New("timeout waiting for ACK")
 
 		case <-retryCh:
 			log.Printf("[%s] manual retry triggered", code)
-			timer.Stop()
+			startTime = time.Now()
 			// Resend data packet (not CHECK) on manual retry
 			// This is needed when client reconnects to server, previous packets were rejected
 			if lastErr = w.writeTo(addr, data); lastErr != nil {
@@ -598,7 +607,7 @@ func (w *reliableWriter) reliableMultiWrite(
 			// Partial acknowledgment, continue waiting
 
 		case <-timer.C:
-			log.Printf("FIN timeout, retrying...")
+			log.Printf("SACK timeout, cache key: %v, retrying...", cacheKey)
 			w.RTO.Increase()
 		}
 		// Send FIN to signal completion

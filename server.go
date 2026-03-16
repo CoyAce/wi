@@ -259,7 +259,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if sack.Unmarshal(pkt) != nil {
 			return
 		}
-		log.Printf("sack received: %v", sack)
+		log.Printf("SACK received: %v", sack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 		}
