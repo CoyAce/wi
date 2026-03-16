@@ -36,20 +36,18 @@ type addrStore struct {
 }
 
 func (s *addrStore) Set(sign *SignBody, addr net.Addr, conn net.PacketConn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.updatePeer(sign, addr, conn)
 	// addr change, remove invalid addr
 	if a, ok := s.uuidToAddr.Load(sign.UUID); ok && a != addr.String() {
 		s.removeByUUID(sign.UUID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.uuidToAddr.Store(sign.UUID, addr.String())
 	s.addrToPeer.Store(addr.String(), p)
 }
 
 func (s *addrStore) removeByUUID(UUID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	addr, ok := s.uuidToAddr.Load(UUID)
 	if ok {
 		s.addrToPeer.Delete(addr)
