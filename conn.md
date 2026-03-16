@@ -132,22 +132,22 @@ type reorderBuffer struct {
 ### 3.8 Reliable Transmission
 
 #### reliableWrite (Core Method)
-Implement reliable transmission with retry mechanism.
+Reliably write single block with ACK/retry mechanism.
 
 **Implementation Notes**:
-- `startTime` variable is declared OUTSIDE the retry loop to preserve timestamp across all attempts
-- `startTime` is recorded ONLY when sending DATA packets (even attempts and manual retry), assuming previous packets may be lost
-- CHECK packets do NOT update startTime, they use the timestamp from the last DATA transmission
-- This ensures RTT measures time from the most recent DATA transmission to ACK receipt
+- Uses ARQ (Automatic Repeat Request) with adaptive timeout control
+- Alternates between DATA and CHECK packets on retries
+- Manual retry via retryCh resends DATA packet directly (not CHECK)
+- **Critical**: `startTime` must be initialized BEFORE the retry loop to correctly measure RTT across all attempts. Initializing inside loop would reset timestamp on each retry, causing incorrect RTT calculation.
 
 **Key Logic**:
-- Send DATA packet on even attempts, record startTime (previous DATA may be lost)
-- Send CHECK packet on odd attempts, do NOT update startTime
-- Wait for ACK with timeout based on RTO
-- On timeout: increase RTO exponentially and retry
-- On write error: log and continue to next attempt
-- Trigger relisten on EPIPE errors
-- On manual retry (retryCh): resend DATA packet and record new startTime
+1. Even attempts: send DATA packet, record startTime before first transmission
+2. Odd attempts: send CHECK packet to probe for lost ACK
+3. Wait for ACK with timeout based on RTO value
+4. On ACK received: update RTO using recorded startTime (measures total RTT including retries)
+5. On timeout: immediately retry
+6. On manual retry (retryCh): resend DATA immediately and jump back to wait for ACK
+7. Trigger relisten on EPIPE errors
 
 #### writeTo
 Write packet with deadline enforcement using _TIMEOUT constant.

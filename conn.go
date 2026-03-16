@@ -467,13 +467,12 @@ func (w *reliableWriter) reliableWrite(
 		code      = new(toOpCode(data[:2])).String()
 		target    = addr.String()
 		lastErr   error
-		startTime time.Time // Declared outside loop to preserve timestamp across retries
+		startTime = time.Now() // Declared outside loop to preserve timestamp across retries
 	)
 
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
 		// Even attempts: send DATA, Odd attempts: send CHECK
 		if attempt%2 == 0 {
-			startTime = time.Now()
 			log.Printf("[%v] write data to [%v]", code, target)
 			if lastErr = w.writeTo(addr, data); lastErr != nil {
 				log.Printf("[%s] write failed: %v", code, lastErr)
@@ -509,7 +508,6 @@ func (w *reliableWriter) reliableWrite(
 
 		case <-retryCh:
 			log.Printf("[%s] manual retry triggered", code)
-			startTime = time.Now()
 			// Resend data packet (not CHECK) on manual retry
 			// This is needed when client reconnects to server, previous packets were rejected
 			if lastErr = w.writeTo(addr, data); lastErr != nil {
