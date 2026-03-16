@@ -2,7 +2,6 @@ package wi
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -484,7 +483,7 @@ func (w *reliableWriter) reliableWrite(
 	data []byte,
 	block uint32,
 ) error {
-	code := new(OpCode(binary.BigEndian.Uint16(data[:2]))).String()
+	code := new(toOpCode(data[:2])).String()
 	var lastErr error
 
 	for attempt := uint8(0); attempt < w.retries; attempt++ {

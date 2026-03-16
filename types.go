@@ -1218,6 +1218,14 @@ func (r *ReplyReq) Unmarshal(p []byte) error {
 
 type ReqData []byte
 
+func (c *ReqData) Code() OpCode {
+	return toOpCode((*c)[:2])
+}
+
+func toOpCode(buf []byte) OpCode {
+	return OpCode(binary.BigEndian.Uint16(buf[:2]))
+}
+
 func (c *ReqData) Marshal() ([]byte, error) {
 	return *c, nil
 }

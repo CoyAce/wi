@@ -491,8 +491,7 @@ func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
 			continue
 		}
 		data := p.([]byte)
-		code := OpCode(binary.BigEndian.Uint16(data[:2]))
-		if code == OpReq {
+		if toOpCode(data[:2]) == OpReq {
 			reqs := new(ReqSet)
 			err := reqs.Unmarshal(data)
 			if err != nil {
@@ -759,7 +758,7 @@ func (s *Server) dispatch(addr net.Addr, data []byte, sender string, block uint3
 		return
 	}
 
-	p, code, key := v.(Peer), OpCode(binary.BigEndian.Uint16(data[:2])), newCacheKey(sender, block)
+	p, code, key := v.(Peer), toOpCode(data[:2]), newCacheKey(sender, block)
 	ctx, ack := context.WithCancel(context.Background())
 	defer ack()
 	p.storeACK(key, ack)

@@ -2,7 +2,6 @@ package wi
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1012,8 +1011,8 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			tracker.Track(r)
 		}
 	case req.Unmarshal(buf) == nil:
-		if OpCode(binary.BigEndian.Uint16((*req.ReqBody.(*ReqData))[:2])) == OpLongText {
-			c.receive(addr, req, c.receiveLongText)
+		if req.ReqBody.(*ReqData).Code() == OpLongText {
+			c.receive(addr, req, c.assembleLongText)
 		} else {
 			c.receive(addr, req, nil)
 		}
@@ -1022,12 +1021,13 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case sack.Unmarshal(buf) == nil:
 		c.notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 	default:
-		code := OpCode(binary.BigEndian.Uint16(buf[:2]))
-		log.Printf("unknown pkt, %v, %v", code.String(), buf)
+		log.Printf("unknown pkt, %v, %v", new(toOpCode(buf[:2])).String(), buf)
 	}
 }
 
-func (c *Client) receiveLongText(cacheKey CacheKey) {
+// assembleLongText assembles long text message from fragments with timeout protection.
+func (c *Client) assembleLongText(cacheKey CacheKey) {
+	defer c.deleteRET(cacheKey)
 	var l LongTextMessage
 	retChan := c.loadOrStoreRET(cacheKey)
 	s := strings.Builder{}
@@ -1036,7 +1036,9 @@ func (c *Client) receiveLongText(cacheKey CacheKey) {
 		select {
 		case r, ok := <-retChan:
 			if !ok {
-				c.deleteRET(cacheKey)
+				if c.dup(cacheKey.UUID, cacheKey.Block) {
+					return
+				}
 				c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, SignBody{l.Sign, cacheKey.UUID}}, l.CreatedAt, []byte(s.String())}
 				return
 			}
@@ -1045,10 +1047,10 @@ func (c *Client) receiveLongText(cacheKey CacheKey) {
 			}
 			s.Write([]byte(l.Text))
 		case <-timer:
+			log.Printf("receive long text %v timeout, discarding partial data", cacheKey)
 			return
 		}
 	}
-	return
 }
 
 func (c *Client) dup(UUID string, block uint32) (dup bool) {
