@@ -1023,6 +1023,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case fin.Unmarshal(buf) == nil:
 		c.notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	case sack.Unmarshal(buf) == nil:
+		log.Printf("SACK received: %v", sack)
 		c.notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
 	default:
 		log.Printf("unknown pkt, %v, %v", new(toOpCode(buf[:2])).String(), buf)

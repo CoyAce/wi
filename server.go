@@ -260,6 +260,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		log.Printf("SACK received: %v", sack)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).notifySACK(newCacheKey(sack.UUID, sack.ReqID), sack.Block)
+		} else {
+			log.Printf("no peer found for sack, %v", addr.String())
 		}
 	case OpReq:
 		req := ReliableReq{ReqBody: new(LongTextMessage)}
@@ -268,6 +270,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).receive(addr, req, s.newReqHandler(p.(Peer), addr, req))
+		} else {
+			log.Printf("no peer found for req, %v", addr.String())
 		}
 	case OpFin:
 		fin := new(Fin)
@@ -276,6 +280,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
 			p.(Peer).notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
+		} else {
+			log.Printf("no peer found for fin, %v", addr.String())
 		}
 	default:
 		var (
@@ -435,6 +441,8 @@ func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 		} else {
 			s.dispatchInOrder(addr, packets, newCacheKey(v.(Peer).UUID, drq.Block))
 		}
+	} else {
+		log.Printf("no peer found for discovery, %v", addr.String())
 	}
 }
 
