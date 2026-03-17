@@ -101,9 +101,14 @@ type RTO struct {
 ```
 
 **Key Methods**:
-- `Update(start time.Time)`: Update RTO based on measured RTT
-- `Increase()`: Exponentially increase RTO on timeout
+- `Update(start time.Time)`: Update RTO based on measured RTT, with rttVar limited to minRTT
 - `Get() time.Duration`: Get current RTO value
+
+**Implementation Notes**:
+- EWMA calculation: `rttVar = min(rttVar*3/4+(rtt-minRTT)/4, minRTT)`
+- RTO formula: `RTO = minRTT + 4*rttVar`
+- Maximum RTO capped at 3 seconds
+- No exponential backoff on timeout (removed for faster message delivery)
 
 ### 3.6 reliableWriter
 Core reliable transmission engine combining block tracking, RTO calculation, and connection management.
@@ -138,16 +143,21 @@ Reliably write single block with ACK/retry mechanism.
 - Uses ARQ (Automatic Repeat Request) with adaptive timeout control
 - Alternates between DATA and CHECK packets on retries
 - Manual retry via retryCh resends DATA packet directly (not CHECK)
-- **Critical**: `startTime` must be initialized BEFORE the retry loop to correctly measure RTT across all attempts. Initializing inside loop would reset timestamp on each retry, causing incorrect RTT calculation.
+- `startTime` is initialized when declared (outside loop) to preserve timestamp across all retries
+- `startTime` records the time before first DATA transmission, measuring complete RTT including all retry attempts
+- On manual retry (retryCh), resend DATA packet and jump back to wait for ACK using same startTime
+- CHECK packets use the original startTime from first DATA transmission
 
 **Key Logic**:
-1. Even attempts: send DATA packet, record startTime before first transmission
-2. Odd attempts: send CHECK packet to probe for lost ACK
-3. Wait for ACK with timeout based on RTO value
-4. On ACK received: update RTO using recorded startTime (measures total RTT including retries)
-5. On timeout: immediately retry
-6. On manual retry (retryCh): resend DATA immediately and jump back to wait for ACK
-7. Trigger relisten on EPIPE errors
+1. Initialize startTime before retry loop (captures start of transmission attempt)
+2. Even attempts: send DATA packet
+3. Odd attempts: send CHECK packet to probe for lost ACK
+4. Wait for ACK with timeout based on RTO value
+5. On ACK received: update RTO using startTime (measures total RTT including all retries)
+6. On timeout: log timeout and continue to next attempt (no RTO increase)
+7. On write error: log error and continue to next attempt
+8. Trigger relisten on EPIPE errors
+9. On manual retry (retryCh): resend DATA immediately and jump back to wait for ACK
 
 #### writeTo
 Write packet with deadline enforcement using _TIMEOUT constant.
@@ -170,11 +180,13 @@ Create UDP listener on localAddr.
 Transfer multiple packets reliably in order with SACK-based acknowledgment.
 
 **Key Logic**:
-1. Send all packets sequentially, last one with IsFinal=true
-2. Wait for SACK from receiver
-3. On timeout: resend FIN packet (not immediately after data)
-4. Resend unacknowledged packets based on SACK feedback
-5. Continue until all packets acknowledged or max retries exceeded
+1. Send all packets sequentially as pre-marshalled byte slices
+2. Last packet implicitly marks completion (no explicit FIN block number)
+3. Wait for SACK from receiver
+4. On SACK received: if block > finalBlock, all acknowledged; otherwise resend specific packet
+5. On timeout: resend FIN packet to prompt completion (not immediately after data)
+6. Continue until all packets acknowledged or max retries exceeded
+7. No RTO increase on timeout (removed for faster delivery)
 
 ### 3.10 Request Processing
 
@@ -308,7 +320,7 @@ handleRequestFlow receives: [block 1], [block 3], [block 2]
 ### 5.3 Timeout Handling
 - **Per-attempt timeout**: Uses RTO value
 - **Process timeout**: 10 seconds fixed
-- **Timeout action**: Exponential backoff (Increase())
+- **Timeout action**: Log and continue (no exponential backoff, removed for faster message delivery)
 
 ---
 
@@ -341,7 +353,8 @@ handleRequestFlow receives: [block 1], [block 3], [block 2]
 ### 7.2 Algorithm Efficiency
 - Binary search for sorted insertion: O(log n)
 - Range tracking with compression: O(ranges)
-- Selective acknowledgment: O(1) for contiguous blocks
+- Selective acknowledgment: O(1) for contiguous blocks, up to O(n) retransmissions for scattered losses
+- Pre-marshaled packets: Avoid repeated serialization in multi-packet transfers
 
 ### 7.3 Resource Cleanup
 - Deferred channel closure
@@ -357,7 +370,7 @@ handleRequestFlow receives: [block 1], [block 3], [block 2]
   - `finChanSize` → `loadOrStoreFIN()`
   - `retChanSize` → `loadOrStoreRET()`
   - `rttWindow` → `RTO.Update()`
-  - `maxRTO`, `rtoIncreaseFactor`, `rtoIncreaseBase` → `RTO.Increase()`
+  - `maxRTO` → `RTO.Update()`
   - `sackChanSize` → `reliableMultiWrite()`
   - `reqChanSize` → `receive()`
   - `requestTimeout` → `handleRequestFlow()`
@@ -379,7 +392,7 @@ Key runtime parameters (all defined in function scope where used):
 - `pendingBufCapacity`: Initial capacity for reorder buffer, 16 (in `newReorderBuffer`)
 - `retChanSize` / `reqChanSize`: Channel buffer sizes, 200 (in `receive`/`loadOrStoreRET`)
 - `initialCapacity`: Map pre-allocation size, 64 (in `newBlockManager`)
-- RTO constants: `maxRTO`, `rtoIncreaseFactor`, `rtoIncreaseBase` (in `RTO.Increase`)
+- RTO constants: `maxRTO`, `rttWindow` (in `RTO.Update`)
 
 These values can be tuned based on network conditions. See section 10 for guidelines.
 
