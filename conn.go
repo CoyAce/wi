@@ -281,7 +281,7 @@ func (r *RTO) Update(startTime time.Time) {
 	// Update minimum RTT if needed
 	const (
 		rttWindow = 10 * time.Minute
-		maxRTO    = 3 * time.Second
+		maxRTO    = 2 * time.Second
 	)
 	if rtt < r.minRTT || time.Since(r.lastUpdate) > rttWindow {
 		r.minRTT = rtt
@@ -289,7 +289,7 @@ func (r *RTO) Update(startTime time.Time) {
 	}
 
 	// EWMA calculation for RTT variance
-	r.rttVar = min(r.rttVar*3/4+(rtt-r.minRTT)/4, r.minRTT)
+	r.rttVar = min(r.rttVar*3/4+(rtt-r.minRTT)/4, r.minRTT/2)
 
 	// Calculate RTO: minRTT + 4*rttVar
 	newRTO := r.minRTT + 4*r.rttVar

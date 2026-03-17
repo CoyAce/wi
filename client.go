@@ -1112,5 +1112,5 @@ var DefaultClient *Client
 
 const (
 	_SERVER  = ""
-	_TIMEOUT = 3 * time.Second
+	_TIMEOUT = 2 * time.Second
 )
