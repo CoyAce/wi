@@ -375,7 +375,7 @@ func nonBlockingSend[T any](ch chan T, value T) {
 	select {
 	case ch <- value:
 	default:
-		log.Printf("channel full, dropping value")
+		log.Printf("channel full, dropping value, %v", value)
 	}
 }
 
@@ -581,10 +581,10 @@ func (w *reliableWriter) reliableMultiWrite(
 
 		case <-timer:
 			log.Printf("SACK timeout, cache key: %v, final block: %v, retrying...", cacheKey, finBlock)
-		}
-		// Send FIN to signal completion
-		if err := w.writeTo(addr, finPkt); err != nil {
-			log.Printf("FIN write failed: %v", err)
+			// Send FIN to signal completion
+			if err := w.writeTo(addr, finPkt); err != nil {
+				log.Printf("FIN write failed: %v", err)
+			}
 		}
 	}
 
@@ -641,14 +641,22 @@ func (w *reliableWriter) handleRequestFlow(
 ) {
 	log.Printf("[%s] handle [%v] from [%v]", opReqString, cacheKey, addr)
 	const requestTimeout = 10 * time.Second
-	finCh := w.loadOrStoreFIN(cacheKey)
-	retCh := w.loadOrStoreRET(cacheKey)
+	var (
+		// Track final block for piggybacked FIN handling
+		finBlock uint32
+		ok       bool
+		finCh    = w.loadOrStoreFIN(cacheKey)
+		retCh    = w.loadOrStoreRET(cacheKey)
 
-	tracker := new(RangeTracker)
-	buffer := newReorderBuffer()
-	timer := time.NewTimer(requestTimeout)
+		tracker = new(RangeTracker)
+		buffer  = newReorderBuffer()
+		timer   = time.NewTimer(requestTimeout)
+	)
 
 	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("post handle request flow failed: %v", r)
+		}
 		w.deleteREQ(cacheKey)
 		w.deleteFIN(cacheKey)
 		close(retCh)
@@ -669,12 +677,13 @@ LOOP:
 			}
 			w.handleIncomingRequest(req, tracker, buffer, retCh)
 
-			// If IsFinal is set, treat it as FIN and forward to finCh
-			if req.IsFinal {
-				finCh <- req.Block
+			// If IsFinal is set, or received after receiving FIN
+			// forward finBlock to finCh
+			if req.IsFinal || finBlock > 0 {
+				nonBlockingSend(finCh, max(req.Block, finBlock))
 			}
 
-		case finBlock, ok := <-finCh:
+		case finBlock, ok = <-finCh:
 			if !ok {
 				return
 			}

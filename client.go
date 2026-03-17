@@ -1020,6 +1020,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			tracker.Track(r)
 		}
 	case req.Unmarshal(buf) == nil:
+		if c.tracker.contains(req.UUID, req.ReqID) {
+			return
+		}
 		if req.ReqBody.(*ReqData).Code() == OpLongText {
 			c.receive(addr, req, c.assembleLongText)
 		} else {

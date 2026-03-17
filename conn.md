@@ -206,10 +206,16 @@ Process incoming requests for a specific cache key with timeout protection and r
 1. Initialize RangeTracker and reorderBuffer
 2. Main loop with 10-second timeout:
    - Receive incoming request → track range, handle reordering
-   - If IsFinal flag is set: treat as FIN signal, check if all packets received (nextMissing > finBlock)
-   - Receive FIN from finCh → send SACK, check if all blocks received
+   - If IsFinal flag is set OR finBlock > 0 (piggybacked FIN): send max(req.Block, finBlock) to finCh
+   - Receive FIN from finCh → send SACK, check if all blocks received (nextMissing > finBlock)
    - Timeout → log and exit
 3. Cleanup resources and call completion callback
+
+**Piggybacked FIN Detection**:
+- After receiving FIN frame (finBlock > 0), all subsequent DATA packets trigger FIN with final block number
+- Uses `max(req.Block, finBlock)` to ensure correct final block is sent to finCh
+- Eliminates need for separate boolean flag by checking `finBlock > 0`
+- Handles late-arriving packets after SACK was sent, ensuring connection completes properly
 
 **SACK Loss Recovery**:
 - **Problem**: If receiver completes and exits after sending SACK, but SACK is lost, sender will keep retransmitting FIN

@@ -269,6 +269,9 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			return
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
+			if p.(Peer).Contains(MonoRange(req.ReqID)) {
+				return
+			}
 			p.(Peer).receive(addr, req, s.newReqHandler(p.(Peer), addr, req))
 		} else {
 			log.Printf("no peer found for req, %v", addr.String())
