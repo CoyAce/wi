@@ -371,6 +371,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			switch ctrl.Code {
 			case OpSyncName:
 				s.cache(sign, ctrl.Block, pkt)
+				// migrate history tracker to prevent duplicates
+				hs := s.loadHistorySet(sign.Sign)
+				if oldHistory, ok := hs.Load(ctrl.Target); ok {
+					hs.Store(ctrl.UUID, oldHistory)
+					hs.Delete(ctrl.Target)
+				}
 				s.ackedRelay(sign, ctrl.Block, pkt)
 			default:
 			}
