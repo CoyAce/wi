@@ -1031,6 +1031,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	case fin.Unmarshal(buf) == nil:
 		log.Printf("FIN received: %v", fin)
 		if c.tracker.contains(fin.UUID, fin.ReqID) {
+			log.Printf("completed request detected: %v", fin)
 			c.sack(addr, fin.UUID, fin.ReqID, fin.Block+1)
 			return
 		}

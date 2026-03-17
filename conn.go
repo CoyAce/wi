@@ -540,6 +540,7 @@ func (w *reliableWriter) reliableMultiWrite(
 	packets [][]byte,
 ) error {
 	const sackChanSize = 1
+	receivedBlock := uint32(0)
 	sackCh := make(chan uint32, sackChanSize)
 	w.storeSACK(cacheKey, sackCh)
 	defer w.deleteSACK(cacheKey)
@@ -573,6 +574,11 @@ func (w *reliableWriter) reliableMultiWrite(
 		case block := <-sackCh:
 			if block > finBlock {
 				return nil // All acknowledged
+			}
+			attempt = 0
+			receivedBlock = max(block-1, receivedBlock)
+			if block <= receivedBlock {
+				continue // Already processed
 			}
 			log.Printf("resend packet %v", block)
 			if err = w.writeTo(addr, packets[block-1]); err != nil {
@@ -643,10 +649,11 @@ func (w *reliableWriter) handleRequestFlow(
 	const requestTimeout = 10 * time.Second
 	var (
 		// Track final block for piggybacked FIN handling
-		finBlock uint32
-		ok       bool
-		finCh    = w.loadOrStoreFIN(cacheKey)
-		retCh    = w.loadOrStoreRET(cacheKey)
+		finBlock  uint32
+		ok        bool
+		finCh     = w.loadOrStoreFIN(cacheKey)
+		retCh     = w.loadOrStoreRET(cacheKey)
+		requested = make(map[uint32]bool)
 
 		tracker = new(RangeTracker)
 		buffer  = newReorderBuffer()
@@ -654,9 +661,11 @@ func (w *reliableWriter) handleRequestFlow(
 	)
 
 	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("post handle request flow failed: %v", r)
-		}
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("post handle request flow failed: %v", r)
+			}
+		}()
 		w.deleteREQ(cacheKey)
 		w.deleteFIN(cacheKey)
 		close(retCh)
@@ -675,11 +684,16 @@ LOOP:
 			if !ok {
 				return
 			}
+			// Skip duplicates
+			if tracker.Contains(MonoRange(req.Block)) {
+				continue
+			}
 			w.handleIncomingRequest(req, tracker, buffer, retCh)
 
-			// If IsFinal is set, or received after receiving FIN
+			// If IsFinal is set, or received sack requested req after receiving FIN
 			// forward finBlock to finCh
-			if req.IsFinal || finBlock > 0 {
+			if req.IsFinal || (finBlock > 0 && requested[req.Block]) {
+				log.Printf("[%v] piggybacking fin, req.Block: %v, finBlock: %v, next: %v", opReqString, req.Block, finBlock, tracker.Next())
 				nonBlockingSend(finCh, max(req.Block, finBlock))
 			}
 
@@ -688,9 +702,8 @@ LOOP:
 				return
 			}
 			nextMissing := tracker.Next()
-			buffer.flushUpTo(retCh, nextMissing-1)
 			w.sack(addr, cacheKey.UUID, cacheKey.Block, nextMissing)
-
+			requested[nextMissing] = true
 			if nextMissing > finBlock {
 				break LOOP
 			}
@@ -718,14 +731,7 @@ func (w *reliableWriter) handleIncomingRequest(
 	buffer *reorderBuffer,
 	retCh chan ReliableReq,
 ) {
-	blockRange := MonoRange(req.Block)
-
-	// Skip duplicates
-	if tracker.Contains(blockRange) {
-		return
-	}
-
-	tracker.Track(blockRange)
+	tracker.Track(MonoRange(req.Block))
 	nextMissing := tracker.Next()
 
 	if nextMissing > req.Block {

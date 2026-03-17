@@ -203,17 +203,20 @@ Process incoming reliable requests with channel multiplexing.
 Process incoming requests for a specific cache key with timeout protection and reordering.
 
 **Key Logic**:
-1. Initialize RangeTracker and reorderBuffer
+1. Initialize RangeTracker, reorderBuffer, and requested map
 2. Main loop with 10-second timeout:
    - Receive incoming request → track range, handle reordering
-   - If IsFinal flag is set OR finBlock > 0 (piggybacked FIN): send max(req.Block, finBlock) to finCh
-   - Receive FIN from finCh → send SACK, check if all blocks received (nextMissing > finBlock)
+   - If IsFinal flag is set OR (finBlock > 0 AND requested[req.Block]): send max(req.Block, finBlock) to finCh via nonBlockingSend
+   - Receive FIN from finCh → send SACK for nextMissing, mark requested[nextMissing]=true, check if all blocks received (nextMissing > finBlock)
    - Timeout → log and exit
-3. Cleanup resources and call completion callback
+3. Cleanup resources with double defer recover protection and call completion callback
 
 **Piggybacked FIN Detection**:
-- After receiving FIN frame (finBlock > 0), all subsequent DATA packets trigger FIN with final block number
-- Uses `max(req.Block, finBlock)` to ensure correct final block is sent to finCh
+- Uses `requested` map to track which blocks have been acknowledged via SACK
+- Only packets that have been SACKed (requested[req.Block]=true) after receiving FIN trigger piggybacked FIN
+- This prevents premature FIN signaling for packets that haven't been acknowledged yet
+- Uses `max(req.Block, finBlock)` to ensure correct final block number is sent to finCh
+- Uses `nonBlockingSend` to avoid blocking on full/closed finCh
 - Eliminates need for separate boolean flag by checking `finBlock > 0`
 - Handles late-arriving packets after SACK was sent, ensuring connection completes properly
 
