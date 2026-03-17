@@ -474,7 +474,7 @@ func (w *reliableWriter) reliableWrite(
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
 		// Even attempts: send DATA, Odd attempts: send CHECK
 		if attempt%2 == 0 {
-			log.Printf("[%v] write data to [%v]", code, target)
+			log.Printf("[%v] write data [%v] to [%v]", code, block, target)
 			if lastErr = w.writeTo(addr, data); lastErr != nil {
 				log.Printf("[%s] write failed: %v", code, lastErr)
 
@@ -485,7 +485,7 @@ func (w *reliableWriter) reliableWrite(
 			}
 		} else {
 			check := Check{Block: block}
-			log.Printf("[%v] check ack for [%v]", code, target)
+			log.Printf("[%v] check [%v] ack for [%v]", code, block, target)
 			if pkt, err := check.Marshal(); err != nil {
 				log.Printf("[%s] check marshal failed: %v", code, err)
 				continue
@@ -558,6 +558,7 @@ func (w *reliableWriter) reliableMultiWrite(
 		return fmt.Errorf("marshal FIN: %w", err)
 	}
 
+	log.Printf("[%v] multiple write [%v] to [%v]", opReqString, cacheKey, addr)
 	// Send all packets
 	for _, pkt := range packets {
 		if err = w.writeTo(addr, pkt); err != nil {
@@ -588,19 +589,6 @@ func (w *reliableWriter) reliableMultiWrite(
 	}
 
 	return errors.New("exhausted retries for FIN")
-}
-
-// notifyFIN sends FIN notification for transfer completion.
-// Uses non-blocking send to avoid blocking on full channel.
-func (w *reliableWriter) notifyFIN(addr net.Addr, key CacheKey, block uint32) {
-	w.multiple.RLock()
-	defer w.multiple.RUnlock()
-
-	if ch, ok := w.fin[key]; ok {
-		nonBlockingSend(ch, block)
-	} else {
-		w.sack(addr, key.UUID, key.Block, block+1)
-	}
 }
 
 // ============================================================================
@@ -651,6 +639,7 @@ func (w *reliableWriter) handleRequestFlow(
 	reqCh chan ReliableReq,
 	complete func(CacheKey),
 ) {
+	log.Printf("[%s] handle [%v] from [%v]", opReqString, cacheKey, addr)
 	const requestTimeout = 10 * time.Second
 	finCh := w.loadOrStoreFIN(cacheKey)
 	retCh := w.loadOrStoreRET(cacheKey)
@@ -741,6 +730,27 @@ func (w *reliableWriter) handleIncomingRequest(
 	} else {
 		// Block is ahead of sequence, buffer it
 		buffer.insert(req)
+	}
+}
+
+// notifyFIN sends FIN notification for transfer completion.
+// Uses non-blocking send to avoid blocking on full channel.
+// If no FIN channel exists and addr is provided, sends SACK for block 1 to request first frame (all REQ lost scenario).
+func (w *reliableWriter) notifyFIN(addr net.Addr, key CacheKey, block uint32) {
+	w.multiple.RLock()
+	defer w.multiple.RUnlock()
+
+	if ch, ok := w.fin[key]; ok {
+		nonBlockingSend(ch, block)
+	} else {
+		// Three possibilities:
+		// 1. FIN comes before Req
+		// 2. SACK loss
+		// 3. All Req loss - no handleRequestFlow goroutine started, need to request first frame
+		log.Printf("[%s] notifyFIN: no FIN channel for %v", opReqString, key)
+
+		// Scenario 3: Send SACK for block 1 to trigger retransmission of first frame
+		w.sack(addr, key.UUID, key.Block, 1)
 	}
 }
 

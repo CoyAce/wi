@@ -399,7 +399,7 @@ func (t *tracker) Track(sign *SignBody, block uint32) {
 	t.loadRangeTracker(sign).Track(MonoRange(block))
 }
 
-// dup tracks packets in user dimension
+// dup tracks packets in user dimension and detect duplicates
 func (t *tracker) dup(UUID string, block uint32) bool {
 	userTracker := t.loadTracker(UUID)
 	r := MonoRange(block)
@@ -408,6 +408,10 @@ func (t *tracker) dup(UUID string, block uint32) bool {
 	}
 	userTracker.Track(r)
 	return false
+}
+
+func (t *tracker) contains(UUID string, block uint32) bool {
+	return t.loadTracker(UUID).Contains(MonoRange(block))
 }
 
 func (c *Client) nextID() uint32 {
@@ -724,6 +728,7 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 		select {
 		case req, ok := <-resp:
 			if !ok {
+				c.dup(key.UUID, key.Block)
 				return ret, nil
 			}
 			if err := discoveryResp.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {
@@ -731,7 +736,7 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 			}
 			ret = append(ret, discoveryResp.UUIDS...)
 		case <-timer:
-			return nil, errors.New("discovery timed out")
+			return nil, fmt.Errorf("discovery timed out, %v", key)
 		}
 	}
 }
@@ -1021,6 +1026,11 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			c.receive(addr, req, nil)
 		}
 	case fin.Unmarshal(buf) == nil:
+		log.Printf("FIN received: %v", fin)
+		if c.tracker.contains(fin.UUID, fin.ReqID) {
+			c.sack(addr, fin.UUID, fin.ReqID, fin.Block+1)
+			return
+		}
 		c.notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 	case sack.Unmarshal(buf) == nil:
 		log.Printf("SACK received: %v", sack)

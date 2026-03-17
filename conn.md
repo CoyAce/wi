@@ -206,10 +206,16 @@ Process incoming requests for a specific cache key with timeout protection and r
 1. Initialize RangeTracker and reorderBuffer
 2. Main loop with 10-second timeout:
    - Receive incoming request → track range, handle reordering
-   - If IsFinal flag is set: forward block number to finCh channel for unified completion handling
-   - Receive FIN from finCh → send SACK, check if all blocks received (nextMissing > finBlock)
+   - If IsFinal flag is set: treat as FIN signal, check if all packets received (nextMissing > finBlock)
+   - Receive FIN from finCh → send SACK, check if all blocks received
    - Timeout → log and exit
 3. Cleanup resources and call completion callback
+
+**SACK Loss Recovery**:
+- **Problem**: If receiver completes and exits after sending SACK, but SACK is lost, sender will keep retransmitting FIN
+- **Solution**: When duplicate FIN arrives after completion, detect it using `tracker.contains()` and respond with SACK immediately
+- **Benefit**: Allows sender to complete early without waiting for timeout
+- **Implementation**: Caller checks `tracker.contains()` before processing FIN (read-only check without state modification), sends SACK if already completed
 
 #### handleIncomingRequest
 Process single incoming request with reordering logic based on sequence gaps.
@@ -265,9 +271,13 @@ Sender                          Receiver
   |<-- [SACK] block 2 -------------| (missing block 2)
   |                                |
   |-- [DATA] block 2 ------------> |
-  |-- [FIN] ---------------------> |  (resend FIN on timeout to prompt completion)
-  |                                |-- [SACK] block 3
-  |<-- [SACK] block 3 -------------| (all received, completion triggered)
+  |-- [FIN] ---------------------> |
+  |                                |-- [SACK] block 4 (all received, exit handler)
+  |<-- [SACK] block 4 -------------| ✗ LOST!
+  |                                |
+  | (timeout, resend FIN)          |
+  |-- [FIN] ---------------------> | ✓ Already completed, resend SACK
+  |<-- [SACK] block 4 -------------| ✓ Sender completes early
 ```
 
 **Note**: FIN packet is sent after timeout in the select loop, not immediately after data packets.
@@ -302,6 +312,11 @@ handleRequestFlow receives: [block 1], [block 3], [block 2]
 - **else** (nextMissing <= incomingReq.Block): Received block is AHEAD of sequence
   - This block is too far ahead, we're still waiting for earlier blocks
   - Insert current block into buffer for later delivery when gaps are filled
+
+**Special Cases**:
+- **FIN before REQ**: If FIN arrives before request processing starts, caller handles duplicate detection and SACK response
+- **Duplicate FIN after completion**: Detected by caller using `tracker.contains()` check (read-only), sends SACK to help sender complete early (SACK loss recovery)
+- **All REQ lost**: If all REQ packets are lost, `handleRequestFlow` is never started, no FIN channel exists. `notifyFIN` sends SACK for block 1 to trigger retransmission of first frame
 
 ---
 

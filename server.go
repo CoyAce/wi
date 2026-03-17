@@ -278,7 +278,12 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if fin.Unmarshal(pkt) != nil {
 			return
 		}
+		log.Printf("FIN received: %v", fin)
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
+			if p.(Peer).Contains(MonoRange(fin.ReqID)) {
+				p.(Peer).sack(addr, fin.UUID, fin.ReqID, fin.Block+1)
+				return
+			}
 			p.(Peer).notifyFIN(addr, newCacheKey(fin.UUID, fin.ReqID), fin.Block)
 		} else {
 			log.Printf("no peer found for fin, %v", addr.String())
