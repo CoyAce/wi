@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -1098,7 +1099,14 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 }
 
 func (c *Client) nck(f file) {
-	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, UUID: c.ID(), ranges: f.Get()}
+	const maxRanges = DatagramSize / 8
+	ranges := f.Get()
+	// Move first k ranges to end for randomized retransmission order
+	// This avoids full shuffle while still distributing load
+	if k := rand.Intn(len(ranges)); len(ranges) >= maxRanges && k > 0 && k < len(ranges) {
+		ranges = append(ranges[k:], ranges[:k]...)
+	}
+	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, UUID: c.ID(), ranges: ranges}
 	if err := c.send(&nck); err != nil {
 		log.Printf("nck failed: %v", err)
 	}
