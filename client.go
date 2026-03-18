@@ -839,9 +839,12 @@ func (c *Client) ListenAndServe(addr string) {
 			close(c.Status)
 		}
 		for {
-			time.Sleep(30 * time.Second)
-			c.SendSign()
-			c.pullTimeoutFiles()
+			select {
+			case <-time.Tick(30 * time.Second):
+				c.SendSign()
+			case <-time.Tick(5 * time.Second):
+				c.pullTimeoutFiles()
+			}
 		}
 	}()
 
