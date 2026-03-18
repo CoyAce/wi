@@ -670,11 +670,12 @@ func (w *reliableWriter) handleRequestFlow(
 	const requestTimeout = 10 * time.Second
 	var (
 		// Track final block for piggybacked FIN handling
-		finBlock  uint32
-		ok        bool
-		finCh     = w.loadOrStoreFIN(cacheKey)
-		retCh     = w.loadOrStoreRET(cacheKey)
-		requested = make(map[uint32]bool)
+		finBlock          uint32
+		ok                bool
+		prevExpectedBlock uint32
+		finCh             = w.loadOrStoreFIN(cacheKey)
+		retCh             = w.loadOrStoreRET(cacheKey)
+		requested         = make(map[uint32]bool)
 
 		tracker = new(RangeTracker)
 		buffer  = newReorderBuffer()
@@ -722,10 +723,16 @@ LOOP:
 			if !ok {
 				return
 			}
-			nextMissing := tracker.Next()
-			w.sack(addr, cacheKey.UUID, cacheKey.Block, nextMissing)
-			requested[nextMissing] = true
-			if nextMissing > finBlock {
+			nextExpectedBlock := tracker.Next()
+			// Skip duplicate SACK if nextExpectedBlock hasn't changed
+			if nextExpectedBlock == prevExpectedBlock {
+				prevExpectedBlock = 0 // Reset to force SACK on next change
+			} else {
+				w.sack(addr, cacheKey.UUID, cacheKey.Block, nextExpectedBlock)
+				requested[nextExpectedBlock] = true
+				prevExpectedBlock = nextExpectedBlock
+			}
+			if nextExpectedBlock > finBlock {
 				break LOOP
 			}
 
