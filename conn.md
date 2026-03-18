@@ -101,14 +101,16 @@ type RTO struct {
 ```
 
 **Key Methods**:
-- `Update(start time.Time)`: Update RTO based on measured RTT, with rttVar limited to minRTT
+- `Update(start time.Time)`: Update RTO based on measured RTT, with rttVar limited to minRTT/2
 - `Get() time.Duration`: Get current RTO value
+- `Increase()`: Exponentially increase RTO on timeout (doubles RTO, capped at 2 seconds)
 
 **Implementation Notes**:
-- EWMA calculation: `rttVar = min(rttVar*3/4+(rtt-minRTT)/4, minRTT)`
+- EWMA calculation: `rttVar = min(rttVar*3/4+(rtt-minRTT)/4, minRTT/2)`
 - RTO formula: `RTO = minRTT + 4*rttVar`
-- Maximum RTO capped at 3 seconds
-- No exponential backoff on timeout (removed for faster message delivery)
+- RTO bounds: capped between minRTO (10ms) and maxRTO (2s)
+- Exponential backoff on timeout: Increase() doubles RTO when timeout occurs
+- Used to handle network condition changes (e.g., LAN to WAN switching)
 
 ### 3.6 reliableWriter
 Core reliable transmission engine combining block tracking, RTO calculation, and connection management.
@@ -154,7 +156,7 @@ Reliably write single block with ACK/retry mechanism.
 3. Odd attempts: send CHECK packet to probe for lost ACK
 4. Wait for ACK with timeout based on RTO value
 5. On ACK received: update RTO using startTime (measures total RTT including all retries)
-6. On timeout: log timeout and continue to next attempt (no RTO increase)
+6. On timeout: increase RTO exponentially via Increase(), log timeout and continue to next attempt
 7. On write error: log error and continue to next attempt
 8. Trigger relisten on EPIPE errors
 9. On manual retry (retryCh): resend DATA immediately and jump back to wait for ACK
@@ -344,7 +346,7 @@ handleRequestFlow receives: [block 1], [block 3], [block 2]
 ### 5.3 Timeout Handling
 - **Per-attempt timeout**: Uses RTO value
 - **Process timeout**: 10 seconds fixed
-- **Timeout action**: Log and continue (no exponential backoff, removed for faster message delivery)
+- **Timeout action**: Exponential backoff via Increase() to handle network changes (e.g., LAN to WAN switching), log and continue
 
 ---
 

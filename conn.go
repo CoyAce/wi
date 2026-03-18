@@ -18,7 +18,10 @@ import (
 // Constants
 // ============================================================================
 
-const opReqString = "REQ"
+const (
+	opReqString = "REQ"
+	maxRTO      = 2 * time.Second
+)
 
 // ============================================================================
 // Core Data Structures
@@ -275,21 +278,23 @@ func (m *multiple) notifySACK(key CacheKey, block uint32) {
 
 // Update updates RTO based on measured RTT using EWMA algorithm.
 // Uses rttWindow = 10 * time.Minute for minimum RTT update window.
-func (r *RTO) Update(startTime time.Time) {
+func (r *RTO) Update(startTime time.Time, timeout bool) {
 	rtt := time.Since(startTime)
 
 	// Update minimum RTT if needed
-	const (
-		rttWindow = 10 * time.Minute
-		maxRTO    = 2 * time.Second
-	)
+	const rttWindow = 10 * time.Minute
 	if rtt < r.minRTT || time.Since(r.lastUpdate) > rttWindow {
 		r.minRTT = rtt
 		r.lastUpdate = time.Now()
 	}
 
 	// EWMA calculation for RTT variance
-	r.rttVar = min(r.rttVar*3/4+(rtt-r.minRTT)/4, r.minRTT/2)
+	if timeout {
+		// if timeout, rtt not accurate, use minRTT/2 instead
+		r.rttVar = r.rttVar*3/4 + r.minRTT/2/4
+	} else {
+		r.rttVar = min(r.rttVar*3/4+max(rtt-r.minRTT, r.minRTT-rtt)/4, r.minRTT/2)
+	}
 
 	// Calculate RTO: minRTT + 4*rttVar
 	newRTO := r.minRTT + 4*r.rttVar
@@ -301,6 +306,19 @@ func (r *RTO) Update(startTime time.Time) {
 // Get returns current RTO value for timeout scheduling.
 func (r *RTO) Get() time.Duration {
 	return time.Duration(r.rto.Load())
+}
+
+// Increase exponentially increases RTO for retransmission.
+// Used when timeout occurs to avoid network congestion.
+func (r *RTO) Increase() {
+	const rtoGrowthFactor = 108 // 8% increase on timeout
+	current := r.Get()
+	newRTO := current * rtoGrowthFactor / 100
+	if newRTO > maxRTO {
+		newRTO = maxRTO
+	}
+	r.minRTT = max(newRTO-4*r.rttVar, r.minRTT)
+	r.rto.Store(int64(newRTO))
 }
 
 // ============================================================================
@@ -500,10 +518,13 @@ func (w *reliableWriter) reliableWrite(
 		timer := time.After(w.RTO.Get())
 		select {
 		case <-ctx.Done():
-			w.RTO.Update(startTime)
+			w.RTO.Update(startTime, attempt > 1)
 			return nil
 
 		case <-timer:
+			if attempt > 1 {
+				w.RTO.Increase()
+			}
 			log.Printf("[%s] timeout, current RTO: %dms", code, w.RTO.Get()/time.Millisecond)
 			lastErr = errors.New("timeout waiting for ACK")
 
