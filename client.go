@@ -838,10 +838,20 @@ func (c *Client) ListenAndServe(addr string) {
 		if c.Status != nil {
 			close(c.Status)
 		}
+
+		signTicker := time.NewTicker(30 * time.Second)
+		defer signTicker.Stop()
+
+		pullTicker := time.NewTicker(2 * time.Second)
+		defer pullTicker.Stop()
+
 		for {
-			time.Sleep(30 * time.Second)
-			c.SendSign()
-			c.pullTimeoutFiles()
+			select {
+			case <-signTicker.C:
+				c.SendSign()
+			case <-pullTicker.C:
+				c.pullTimeoutFiles()
+			}
 		}
 	}()
 
@@ -850,7 +860,7 @@ func (c *Client) ListenAndServe(addr string) {
 
 func (c *Client) pullTimeoutFiles() {
 	for _, v := range c.files {
-		if time.Since(v.updateAt) > 3*time.Second {
+		if time.Since(v.updateAt) > 2*time.Second {
 			c.tryComplete(v.req.FileId)
 		}
 	}
