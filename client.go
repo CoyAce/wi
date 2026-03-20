@@ -326,7 +326,7 @@ LOOP:
 }
 
 type Client struct {
-	Status chan struct{} `json:"-"` // initialization status
+	State
 	Identity
 	Config
 	messages
@@ -334,6 +334,11 @@ type Client struct {
 	connManager
 	fileManager
 	*audioManager
+}
+
+type State struct {
+	Status        chan struct{} `json:"-"` // initialization status
+	discoverState int32         // 0 = finished,1 = discovering
 }
 
 type Config struct {
@@ -364,6 +369,32 @@ type messages struct {
 type tracker struct {
 	sync.Map          // uuid -> *RangeTracker, track duplicate packets in user dimension
 	history  sync.Map // sign -> *sync.Map { uuid -> *RangeTracker }, track missing packets in sign and user dimension
+	users    sync.Map // uuid -> bool
+}
+
+func (t *tracker) UpdateUsers(users []string) {
+	state := make(map[string]bool)
+	for _, u := range users {
+		state[u] = true
+		t.users.Store(u, true)
+	}
+	t.users.Range(func(key, value any) bool {
+		if !state[key.(string)] {
+			t.users.Delete(key)
+		}
+		return true
+	})
+}
+
+func (t *tracker) SetActive(uuid string) {
+	t.users.Store(uuid, true)
+}
+
+func (t *tracker) IsActive(uuid string) bool {
+	if v, ok := t.users.Load(uuid); ok {
+		return v.(bool)
+	}
+	return false
 }
 
 func (t *tracker) loadTracker(UUID string) *RangeTracker {
@@ -760,7 +791,7 @@ func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map) {
 		unknown []string
 		err     error
 	)
-	if unknown, err = c.getUnknownUsers(hs); err != nil {
+	if unknown, err = c.discoverUnknownUsers(hs); err != nil {
 		log.Printf("pull messages of unknown users failed: %v", err)
 		return
 	}
@@ -778,7 +809,7 @@ func (c *Client) pullMessagesOf(users []string, hs *sync.Map) {
 	}
 }
 
-func (c *Client) getUnknownUsers(hs *sync.Map) ([]string, error) {
+func (c *Client) discoverUnknownUsers(hs *sync.Map) ([]string, error) {
 	users, err := c.Discover(Active)
 	if err != nil {
 		return nil, err
@@ -855,8 +886,9 @@ func (c *Client) ListenAndServe(addr string) {
 			select {
 			case <-signTicker.C:
 				c.SendSign()
+				go c.discoverOnlineUsers()
 			case <-pullTicker.C:
-				c.pullTimeoutFiles()
+				go c.pullTimeoutFiles()
 			}
 		}
 	}()
@@ -864,9 +896,24 @@ func (c *Client) ListenAndServe(addr string) {
 	c.serve()
 }
 
+func (c *Client) discoverOnlineUsers() {
+	if !atomic.CompareAndSwapInt32(&c.discoverState, 0, 1) {
+		log.Printf("discover already in progress, skipping")
+		return
+	}
+	defer atomic.StoreInt32(&c.discoverState, 0)
+	onlineUsers, err := c.Discover(Online)
+	log.Printf("discovered online users: %v", onlineUsers)
+	if err != nil {
+		log.Printf("discover failed: %v", err)
+	} else {
+		c.tracker.UpdateUsers(onlineUsers)
+	}
+}
+
 func (c *Client) pullTimeoutFiles() {
 	for _, v := range c.files {
-		if time.Since(v.updateAt) > 2*time.Second {
+		if c.IsActive(v.req.UUID) && time.Since(v.updateAt) > 2*time.Second {
 			c.tryComplete(v.req.FileId)
 		}
 	}
@@ -960,6 +1007,9 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		}
 		s := string(msg.Payload)
 		log.Printf("Receiving text [%s] from [%s]\n", s, msg.UUID)
+		if time.Since(time.UnixMilli(msg.CreatedAt)) < 10*time.Second {
+			c.SetActive(msg.UUID)
+		}
 		c.SignedMessages <- msg
 	case rrq.Unmarshal(buf) == nil:
 		c.ack(addr, rrq.Subscriber, rrq.Block)
