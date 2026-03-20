@@ -256,6 +256,9 @@ func (r *RangeTracker) Contains(rg Range) bool {
 func (r *RangeTracker) Get() []Range {
 	r.rwLock.RLock()
 	defer r.rwLock.RUnlock()
+	if len(r.ranges) == 0 {
+		return []Range{}
+	}
 	ret := make([]Range, len(r.ranges))
 	copy(ret, r.ranges)
 	return ret
@@ -264,6 +267,9 @@ func (r *RangeTracker) Get() []Range {
 func (r *RangeTracker) Select(x Range) []Range {
 	r.rwLock.RLock()
 	defer r.rwLock.RUnlock()
+	if len(r.ranges) == 0 {
+		return []Range{}
+	}
 	ret := make([]Range, 0, len(r.ranges))
 	for _, rng := range r.ranges {
 		if v, ok := rng.intersects(x); ok {
@@ -276,6 +282,9 @@ func (r *RangeTracker) Select(x Range) []Range {
 func (r *RangeTracker) remove(rg Range) {
 	r.rwLock.Lock()
 	defer r.rwLock.Unlock()
+	if len(r.ranges) == 0 {
+		return
+	}
 	ret := make([]Range, 0, len(r.ranges))
 	for _, v := range r.ranges {
 		if rg.before(v) || rg.after(v) {

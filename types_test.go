@@ -2,6 +2,7 @@ package wi
 
 import (
 	"encoding/hex"
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -193,6 +194,17 @@ func TestRangeAdd(t *testing.T) {
 	rt.Track(rt.ranges[0])
 	if !rt.isCompleted() {
 		t.Error("Expected RangeTracker to be completed")
+	}
+}
+
+func TestFullRange(t *testing.T) {
+	rt := RangeTracker{}
+	rt.Track(FullRange)
+	if !rt.isCompleted() {
+		t.Error("Expected RangeTracker to be completed")
+	}
+	if rt.nextBlock() != math.MaxUint32 {
+		t.Error("Expected RangeTracker to have MaxUint32 as next block")
 	}
 }
 

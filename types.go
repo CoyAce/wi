@@ -1593,6 +1593,10 @@ func MonoRange(v uint32) Range {
 	return Range{start: v, end: v}
 }
 
+func RangeFrom(start, end uint32) Range {
+	return Range{start: start, end: end}
+}
+
 func (r *Range) Marshal() []byte {
 	b := new(bytes.Buffer)
 	b.Grow(8)

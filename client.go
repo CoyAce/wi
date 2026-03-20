@@ -400,6 +400,11 @@ func (t *tracker) Track(sign *SignBody, block uint32) {
 	t.loadRangeTracker(sign).Track(MonoRange(block))
 }
 
+// MultiTrack tracks packets in sign dimension
+func (t *tracker) MultiTrack(sign *SignBody, rgn Range) {
+	t.loadRangeTracker(sign).Track(rgn)
+}
+
 // dup tracks packets in user dimension and detect duplicates
 func (t *tracker) dup(UUID string, block uint32) bool {
 	userTracker := t.loadTracker(UUID)
@@ -1126,7 +1131,10 @@ func (c *Client) SetServerAddr(addr string) {
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", addr)
 }
 
-var DefaultClient *Client
+var (
+	DefaultClient *Client
+	FullRange     = RangeFrom(1, math.MaxUint32-1)
+)
 
 const (
 	_SERVER  = ""
