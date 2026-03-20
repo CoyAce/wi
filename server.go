@@ -161,6 +161,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		log.Printf("[%s] set sign: [%v]", addr.String(), sign)
 	case OpSignOut:
 		s.removeByAddr(addr.String())
+		log.Printf("[%s] sign out,users: %v", addr.String(), s.collectOnlineUsers("default"))
 	case OpAck:
 		var ack Ack
 		if ack.Unmarshal(pkt) != nil {
