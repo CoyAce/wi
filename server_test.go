@@ -66,7 +66,7 @@ func TestListenPacketUDP(t *testing.T) {
 	// clientA send text "beautiful world"
 	clientA := Client{
 		Config:   Config{ServerAddr: serverAddr},
-		Status:   make(chan struct{}),
+		State:    State{Status: make(chan struct{})},
 		Identity: Identity{UUID: uuidA, Sign: sign},
 	}
 	go func() {
@@ -410,6 +410,7 @@ func TestSignOut(t *testing.T) {
 	if err == nil {
 		t.Errorf("sign out failed")
 	}
+	sender.SignIn()
 	_ = sender.SendText("hello")
 	_, err = server.parseAddrByUUID(sender.ID())
 	if err != nil {
@@ -713,7 +714,7 @@ func newClient(serverAddr string, UUID string) *Client {
 	client := Client{
 		Config:   Config{ExternalDir: "./test", ServerAddr: serverAddr},
 		Identity: Identity{UUID: UUID, Sign: "default"},
-		Status:   make(chan struct{}),
+		State:    State{Status: make(chan struct{})},
 	}
 	go func() {
 		client.ListenAndServe("127.0.0.1:")

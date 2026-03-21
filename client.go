@@ -338,8 +338,14 @@ type Client struct {
 
 type State struct {
 	Status        chan struct{} `json:"-"` // initialization status
-	discoverState int32         // 0 = finished,1 = discovering
+	discoverState atomic.Int32  // 0 = finished,1 = discovering
+	onlineState   atomic.Int32  // 0 = online,1 = offline
 }
+
+const (
+	On = iota
+	Off
+)
 
 type Config struct {
 	ServerAddr     string
@@ -894,11 +900,11 @@ func (c *Client) ListenAndServe(addr string) {
 }
 
 func (c *Client) discoverOnlineUsers() {
-	if !atomic.CompareAndSwapInt32(&c.discoverState, 0, 1) {
+	if !c.discoverState.CompareAndSwap(0, 1) {
 		log.Printf("discover already in progress, skipping")
 		return
 	}
-	defer atomic.StoreInt32(&c.discoverState, 0)
+	defer c.discoverState.Store(0)
 	onlineUsers, err := c.Discover(Online)
 	log.Printf("discovered online users: %v", onlineUsers)
 	if err != nil {
@@ -936,6 +942,7 @@ func (c *Client) SendSign() {
 }
 
 func (c *Client) SignIn() {
+	c.onlineState.Store(On)
 	sign := SignReq{c.nextID(), SignBody{c.Sign, c.ID()}}
 	if pkt, err := sign.Marshal(); err != nil {
 		log.Printf("marshal sign request failed: %v", err)
@@ -945,6 +952,7 @@ func (c *Client) SignIn() {
 }
 
 func (c *Client) SignOut() {
+	c.onlineState.Store(Off)
 	if pkt, err := new(OpSignOut).Marshal(); err != nil {
 		log.Printf("marshal failed: %v", err)
 	} else if err = c.writeToServer(pkt); err != nil {
@@ -1069,7 +1077,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 		log.Printf("nck received, [%v]-[%v]", nck.UUID, nck.Block)
 		c.req <- nck
 	case ec.Unmarshal(buf) == nil:
-		if ec == ErrUnknownUser {
+		if ec == ErrUnknownUser && c.onlineState.Load() == On {
 			c.SignIn()
 			c.triggerAllRetries()
 		}
