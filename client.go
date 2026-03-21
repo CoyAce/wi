@@ -47,7 +47,12 @@ func (f *fileWriter) loop() {
 	for {
 		select {
 		case req := <-f.wrq:
-			if req.Code == OpReady {
+			if req.Code == OpCancel {
+				log.Printf("OpCancel received, file %d not exist", req.FileId)
+				if c, ok := f.files[req.FileId]; ok && c.req.UUID == req.UUID {
+					f.clean(req.FileId)
+				}
+			} else if req.Code == OpReady {
 				log.Printf("OpReady received, try complete")
 				if !f.isFile(req.FileId) {
 					continue
@@ -273,21 +278,26 @@ func (f *fileContent) unsetProcessing() {
 }
 
 type fileReader struct {
-	req       chan Nck // packets request
-	opReady   func(id uint32) error
+	req       chan Nck                // packets request
 	contents  map[uint32]*fileContent // fileId -> *fileContent
-	writeOnce func(data Data) error   // send single data packet
+	opReady   func(id uint32) error
+	opCancel  func(id uint32) error
+	writeOnce func(data Data) error // send single data packet
 }
 
 func (f *fileReader) process() {
 	for n := range f.req {
-		c := f.contents[n.FileId]
-		if c == nil {
-			continue
-		}
-		c.add(n.ranges)
-		if !c.isProcessing() {
-			go f.read(n.FileId)
+		if c, ok := f.contents[n.FileId]; ok {
+			c.add(n.ranges)
+			if !c.isProcessing() {
+				go f.read(n.FileId)
+			}
+		} else {
+			go func() {
+				if err := f.opCancel(n.FileId); err != nil {
+					log.Printf("Send OpCancel failed: %v", err)
+				}
+			}()
 		}
 	}
 }
@@ -479,6 +489,7 @@ func newFileMetaInfo(
 	externalDir string,
 	nck func(f file),
 	opReady func(id uint32) error,
+	opCancel func(id uint32) error,
 	writeOnce func(d Data) error,
 	fileMessages chan<- WriteReq,
 ) fileManager {
@@ -486,6 +497,7 @@ func newFileMetaInfo(
 		fileReader: &fileReader{
 			req:       make(chan Nck, 10),
 			opReady:   opReady,
+			opCancel:  opCancel,
 			writeOnce: writeOnce,
 			contents:  make(map[uint32]*fileContent),
 		},
@@ -690,6 +702,11 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 func (c *Client) opReady(id uint32) error {
 	log.Printf("send OpReady")
 	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, UUID: c.ID()})
+}
+
+func (c *Client) opCancel(id uint32) error {
+	log.Printf("send OpCancel")
+	return c.send(&WriteReq{Code: OpCancel, Block: c.nextID(), FileId: id, UUID: c.ID()})
 }
 
 func (c *Client) writeOnce(data Data) error {
@@ -929,7 +946,7 @@ func (c *Client) init() {
 	c.blockManager = newBlockManager()
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.writeOnce, c.FileMessages)
+	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.opCancel, c.writeOnce, c.FileMessages)
 }
 
 // SendSign try to write sign to server

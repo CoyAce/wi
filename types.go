@@ -47,6 +47,7 @@ const (
 	OpFin
 	OpReq
 	OpLongText
+	OpCancel
 )
 
 var wrqSet = map[OpCode]bool{
@@ -61,6 +62,7 @@ var wrqSet = map[OpCode]bool{
 	OpPublish:         true,
 	OpContent:         true,
 	OpReady:           true,
+	OpCancel:          true,
 }
 
 var rrqSet = map[OpCode]bool{
@@ -136,6 +138,8 @@ func (op *OpCode) String() string {
 		return "REQ"
 	case OpLongText:
 		return "LongText"
+	case OpCancel:
+		return "Cancel"
 	}
 	return "unknown"
 }
