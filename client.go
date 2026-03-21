@@ -869,23 +869,20 @@ func (c *Client) ListenAndServe(addr string) {
 	go c.process()
 
 	c.remoteAddr, _ = net.ResolveUDPAddr("udp", c.ServerAddr)
+	c.SendSign()
+	if c.Status != nil {
+		close(c.Status)
+	}
 	go func() {
-		// auto relisten in case of server restart
-		c.SendSign()
-		if c.Status != nil {
-			close(c.Status)
-		}
-
-		signTicker := time.NewTicker(30 * time.Second)
-		defer signTicker.Stop()
+		discoverTicker := time.NewTicker(30 * time.Second)
+		defer discoverTicker.Stop()
 
 		pullTicker := time.NewTicker(2 * time.Second)
 		defer pullTicker.Stop()
 
 		for {
 			select {
-			case <-signTicker.C:
-				c.SendSign()
+			case <-discoverTicker.C:
 				go c.discoverOnlineUsers()
 			case <-pullTicker.C:
 				go c.pullTimeoutFiles()
