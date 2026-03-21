@@ -350,6 +350,7 @@ type State struct {
 	Status        chan struct{} `json:"-"` // initialization status
 	discoverState atomic.Int32  // 0 = finished,1 = discovering
 	onlineState   atomic.Int32  // 0 = online,1 = offline
+	pullState     atomic.Int32  // 0 = pull finished,1 = pulling
 }
 
 const (
@@ -802,14 +803,25 @@ func (c *Client) Discover(flag DiscoveryFlag) ([]string, error) {
 }
 
 func (c *Client) Pull() {
+	if !c.pullState.CompareAndSwap(0, 1) {
+		log.Printf("pull already in progress, skipping")
+		return
+	}
+	defer c.pullState.Store(0)
+	c.pullTimeoutFiles()
+	wg := new(sync.WaitGroup)
 	hs := c.loadHistorySet(c.Sign)
 	knownUsers := c.getUsers(hs)
-	go c.pullMessagesOfUnknownUsers(hs)
-	go c.pullTimeoutFiles()
-	c.pullMessagesOf(knownUsers, hs)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.pullMessagesOfUnknownUsers(hs, wg)
+	}()
+	c.pullMessagesOf(knownUsers, hs, wg)
+	wg.Wait()
 }
 
-func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map) {
+func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map, wg *sync.WaitGroup) {
 	var (
 		unknown []string
 		err     error
@@ -821,13 +833,17 @@ func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map) {
 	for _, u := range unknown {
 		c.Track(&SignBody{Sign: c.Sign, UUID: u}, 0)
 	}
-	c.pullMessagesOf(unknown, hs)
+	c.pullMessagesOf(unknown, hs, wg)
 }
 
-func (c *Client) pullMessagesOf(users []string, hs *sync.Map) {
+func (c *Client) pullMessagesOf(users []string, hs *sync.Map, wg *sync.WaitGroup) {
 	for _, user := range users {
 		if t, ok := hs.Load(user); ok {
-			go c.pullMessages(user, t.(*RangeTracker))
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.pullMessages(user, t.(*RangeTracker))
+			}()
 		}
 	}
 }

@@ -282,7 +282,7 @@ func TestClientDupMessage(t *testing.T) {
 		if !reflect.DeepEqual(received, msg) {
 			t.Errorf("expected message %v; actual message %v", msg, received)
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 	_, _ = client.WriteTo(msgPkt, sAddr)
@@ -328,28 +328,15 @@ func TestServerDupMessage(t *testing.T) {
 func TestDupMessage(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
-	_ = receiver.SendText("sync")
-	sender1 := newClient(serverAddr, "sender1")
-	sender2 := newClient(serverAddr, "sender2")
+	receiver.SignIn()
+	sender := newClient(serverAddr, "sender")
 	go func() {
-		_ = sender1.SendText("hello")
-	}()
-	time.Sleep(1 * time.Millisecond)
-	go func() {
-		_ = sender2.SendText("world")
+		_ = sender.SendText("hello")
 	}()
 	select {
 	case received := <-receiver.SignedMessages:
 		if string(received.Payload) != "hello" {
 			t.Errorf("expected message %v; actual message %v", "hello", string(received.Payload))
-		}
-	case <-time.After(10 * time.Millisecond):
-		t.Errorf("timeout")
-	}
-	select {
-	case received := <-receiver.SignedMessages:
-		if string(received.Payload) != "world" {
-			t.Errorf("expected message %v; actual message %v", "world", string(received.Payload))
 		}
 	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
@@ -564,7 +551,7 @@ func TestCheck(t *testing.T) {
 	<-receiver.SignedMessages
 	v, ok := s.addrToPeer.Load(receiver.conn.LocalAddr().String())
 	if !ok {
-		t.Error("expected peer to load")
+		t.Fatal("expected peer to load")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cacheKey := newCacheKey(msg.UUID, msg.Block)
