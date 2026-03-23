@@ -600,7 +600,10 @@ func (w *reliableWriter) reliableMultiWrite(
 			if block > finBlock {
 				return nil // All acknowledged
 			}
-			attempt = 0
+			// check received block to avoid infinite loop
+			if receivedBlock > 0 {
+				attempt = 0
+			}
 			receivedBlock = max(block-1, receivedBlock)
 			if block <= receivedBlock {
 				continue // Already processed
