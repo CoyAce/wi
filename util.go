@@ -230,7 +230,7 @@ func (r *RangeTracker) Next() uint32 {
 	defer r.rwLock.RUnlock()
 	ranges := r.Get()
 	if len(r.ranges) == 0 {
-		return r.nextBlock()
+		return r.latestBlock + 1
 	}
 	return ranges[0].start
 }
@@ -239,7 +239,7 @@ func (r *RangeTracker) Next() uint32 {
 func (r *RangeTracker) Contains(rg Range) bool {
 	r.rwLock.RLock()
 	defer r.rwLock.RUnlock()
-	if rg.end >= r.nextBlock() {
+	if rg.end >= r.latestBlock+1 {
 		return false
 	}
 	if len(r.ranges) == 0 {
