@@ -589,12 +589,14 @@ func (w *reliableWriter) reliableMultiWrite(
 			log.Printf("packet write failed: %v", err)
 		}
 	}
+	startTime := time.Now()
 
 	// Wait for SACK with retries
 	for attempt := uint8(0); attempt < w.retries; attempt++ {
 		timer := time.After(w.RTO.Get())
 		select {
 		case block := <-sackCh:
+			w.RTO.Update(startTime, receivedBlock != 0)
 			if block > finBlock {
 				return nil // All acknowledged
 			}

@@ -494,8 +494,16 @@ func (s *Server) collectActiveUsers(sign string) []string {
 func (s *Server) push(signBody *SignBody, pr PullReq, addr net.Addr) {
 	h := s.loadHistory(signBody)
 	if pr.end == math.MaxUint32 {
+		if h.latestBlock == 0 {
+			return
+		}
 		s.reply(signBody, addr, h.Get())
 		s.pushRange(signBody, addr, h, Range{pr.start, h.nextBlock()})
+		return
+	}
+	// no history recorded, skip all
+	if h.latestBlock == 0 {
+		s.reply(signBody, addr, []Range{pr.Range})
 		return
 	}
 	ranges := h.Select(pr.Range)
