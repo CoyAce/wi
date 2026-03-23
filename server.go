@@ -488,7 +488,9 @@ func (s *Server) collectActiveUsers(sign string) []string {
 	uuids := make([]string, 0, 16)
 	hs := s.loadHistorySet(sign)
 	hs.Range(func(k, v interface{}) bool {
-		uuids = append(uuids, k.(string))
+		if v.(*history).latestBlock != 0 {
+			uuids = append(uuids, k.(string))
+		}
 		return true
 	})
 	return uuids

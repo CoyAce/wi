@@ -812,34 +812,25 @@ func (c *Client) Pull() {
 	c.pullTimeoutFiles()
 	wg := new(sync.WaitGroup)
 	hs := c.loadHistorySet(c.Sign)
-	knownUsers := c.getUsers(hs)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		c.pullMessagesOfUnknownUsers(hs, wg)
-	}()
-	c.pullMessagesOf(knownUsers, hs, wg)
+	if activeUsers, err := c.Discover(Active); err != nil {
+		log.Printf("[Pull] discover active user failed, %v", err)
+		knownUsers := c.getUsers(hs)
+		c.pullMessagesOf(knownUsers, hs, wg)
+	} else {
+		for _, u := range activeUsers {
+			if _, ok := hs.Load(u); !ok && u != c.ID() {
+				c.Track(&SignBody{Sign: c.Sign, UUID: u}, 0)
+			}
+		}
+		c.pullMessagesOf(activeUsers, hs, wg)
+	}
 	wg.Wait()
 }
 
-func (c *Client) pullMessagesOfUnknownUsers(hs *sync.Map, wg *sync.WaitGroup) {
-	var (
-		unknown []string
-		err     error
-	)
-	if unknown, err = c.discoverUnknownUsers(hs); err != nil {
-		log.Printf("pull messages of unknown users failed: %v", err)
-		return
-	}
-	for _, u := range unknown {
-		c.Track(&SignBody{Sign: c.Sign, UUID: u}, 0)
-	}
-	c.pullMessagesOf(unknown, hs, wg)
-}
-
 func (c *Client) pullMessagesOf(users []string, hs *sync.Map, wg *sync.WaitGroup) {
+	log.Printf("pull messages of %v", users)
 	for _, user := range users {
-		if t, ok := hs.Load(user); ok {
+		if t, ok := hs.Load(user); ok && user != c.ID() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -849,20 +840,6 @@ func (c *Client) pullMessagesOf(users []string, hs *sync.Map, wg *sync.WaitGroup
 			}()
 		}
 	}
-}
-
-func (c *Client) discoverUnknownUsers(hs *sync.Map) ([]string, error) {
-	users, err := c.Discover(Active)
-	if err != nil {
-		return nil, err
-	}
-	unknown := make([]string, 0, 16)
-	for _, u := range users {
-		if _, ok := hs.Load(u); !ok && u != c.ID() {
-			unknown = append(unknown, u)
-		}
-	}
-	return unknown, nil
 }
 
 func (c *Client) getUsers(hs *sync.Map) []string {
