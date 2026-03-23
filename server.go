@@ -257,6 +257,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	case OpReq:
 		req := ReliableReq{ReqBody: &ReqData{}}
 		if req.Unmarshal(pkt) != nil {
+			log.Printf("reliable req unmarshal failed, pkt: %v", pkt)
 			return
 		}
 		if p, ok := s.addrToPeer.Load(addr.String()); ok {
@@ -372,6 +373,8 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 				s.ackedRelay(sign, ctrl.Block, pkt)
 			default:
 			}
+		default:
+			log.Printf("unknown pkt, code %v, %v: ", code, pkt)
 		}
 	}
 }
