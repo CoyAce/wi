@@ -819,6 +819,36 @@ func (w *reliableWriter) sack(addr net.Addr, uuid string, reqID uint32, block ui
 	}
 }
 
+func (w *reliableWriter) processWith(processFunc func(cacheKey CacheKey, req ReliableReq, ok bool)) func(cacheKey CacheKey) {
+	return func(cacheKey CacheKey) {
+		defer w.deleteRET(cacheKey)
+		retChan := w.loadOrStoreRET(cacheKey)
+
+		// Create timer once and reuse
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+
+		for {
+			// Reset timer for this iteration
+			timer.Reset(10 * time.Second)
+
+			select {
+			case r, ok := <-retChan:
+				if processFunc != nil {
+					processFunc(cacheKey, r, ok)
+				}
+				if !ok {
+					return
+				}
+
+			case <-timer.C:
+				log.Printf("[Req] %v timeout, discarding collected requests", cacheKey)
+				return
+			}
+		}
+	}
+}
+
 // ============================================================================
 // Connection Manager Public API
 // ============================================================================

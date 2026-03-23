@@ -1039,18 +1039,12 @@ func (n *Nck) Unmarshal(p []byte) error {
 }
 
 type PullReq struct {
-	Block uint32
-	SignBody
 	Range          // pull range
 	ranges []Range // missing packets
 }
 
-func (pr *PullReq) ID() uint32 {
-	return pr.Block
-}
-
 func (pr *PullReq) Marshal() ([]byte, error) {
-	baseSize := 2 + 4 + len(pr.Sign) + 1 + len(pr.UUID) + 1 + 8 + 1
+	baseSize := 2 + 8 + 1
 	size := baseSize + len(pr.ranges)*8
 	b := new(bytes.Buffer)
 	b.Grow(size)
@@ -1059,16 +1053,6 @@ func (pr *PullReq) Marshal() ([]byte, error) {
 	}
 
 	err := binary.Write(b, binary.BigEndian, uint16(OpPull)) // write operation code
-	if err != nil {
-		return nil, err
-	}
-
-	err = binary.Write(b, binary.BigEndian, pr.Block) // write block number
-	if err != nil {
-		return nil, err
-	}
-
-	err = pr.SignBody.Marshal(b) // write sign body
 	if err != nil {
 		return nil, err
 	}
@@ -1101,16 +1085,6 @@ func (pr *PullReq) Unmarshal(p []byte) error {
 	}
 
 	if code != OpPull {
-		return InvalidData
-	}
-
-	err = binary.Read(r, binary.BigEndian, &pr.Block) // read block id
-	if err != nil {
-		return InvalidData
-	}
-
-	err = pr.SignBody.Unmarshal(r) //  read sign body
-	if err != nil {
 		return InvalidData
 	}
 

@@ -843,7 +843,9 @@ func (c *Client) pullMessagesOf(users []string, hs *sync.Map, wg *sync.WaitGroup
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				c.pullMessages(user, t.(*RangeTracker))
+				if err := c.pullMessages(user, t.(*RangeTracker)); err != nil {
+					log.Printf("pull messages of %v failed: %v", user, err)
+				}
 			}()
 		}
 	}
@@ -874,24 +876,24 @@ func (c *Client) getUsers(hs *sync.Map) []string {
 	return users
 }
 
-func (c *Client) pullMessages(UUID string, tracker *RangeTracker) {
+func (c *Client) pullMessages(UUID string, tracker *RangeTracker) error {
 	var (
 		ranges   = tracker.Get()
-		baseSize = 17 + len(UUID) + len(c.Sign)
+		baseSize = 13 + len(UUID) + len(c.Sign) + 2 + 8 + 1
 		maxLen   = (DatagramSize - baseSize) / 8
-		pr       *PullReq
 		signBody = SignBody{Sign: c.Sign, UUID: UUID}
+		reqID    = c.nextID()
+		pullReqs = make([]ReliableReq, 0, 16)
 	)
-	for _, r := range partition(ranges, maxLen) {
+	for i, r := range partition(ranges, maxLen) {
 		rg := Range{r[0].start, r[len(r)-1].end}
-		pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: rg, ranges: r}
-		if err := c.send(pr); err != nil {
-			log.Printf("pull failed: %v", err)
-		}
+		pullReqs = append(pullReqs, ReliableReq{ReqHeader{uint32(i + 1), reqID, signBody}, &PullReq{Range: rg, ranges: r}, false})
 	}
-	pr = &PullReq{Block: c.nextID(), SignBody: signBody, Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}
-	if err := c.send(pr); err != nil {
-		log.Printf("pull failed: %v", err)
+	pullReqs = append(pullReqs, ReliableReq{ReqHeader{uint32(len(pullReqs) + 1), reqID, signBody}, &PullReq{Range: Range{start: tracker.nextBlock(), end: math.MaxUint32}}, true})
+	if packets, err := new(ReqSet(pullReqs)).ToPackets(); err != nil {
+		return err
+	} else {
+		return c.reliableMultiWrite(c.remoteAddr, newCacheKey(c.ID(), reqID), packets)
 	}
 }
 
@@ -1129,7 +1131,7 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 			return
 		}
 		if req.ReqBody.(*ReqData).Code() == OpLongText {
-			c.receive(addr, req, c.assembleLongText)
+			c.receive(addr, req, c.processWith(c.newLongTextHandler()))
 		} else {
 			c.receive(addr, req, nil)
 		}
@@ -1149,35 +1151,27 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 	}
 }
 
-// assembleLongText assembles long text message from fragments with timeout protection.
-func (c *Client) assembleLongText(cacheKey CacheKey) {
-	defer c.deleteRET(cacheKey)
+// newLongTextHandler assembles long text message from fragments
+func (c *Client) newLongTextHandler() func(cacheKey CacheKey, req ReliableReq, ok bool) {
 	var (
-		l      LongTextMessage
-		cached *ReliableReq
+		l LongTextMessage
+		r *ReliableReq
+		s strings.Builder
 	)
-	retChan := c.loadOrStoreRET(cacheKey)
-	s := strings.Builder{}
-	for {
-		timer := time.After(10 * time.Second)
-		select {
-		case r, ok := <-retChan:
-			if !ok {
-				if c.dup(cacheKey.UUID, cacheKey.Block) {
-					return
-				}
-				c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, cached.SignBody}, l.CreatedAt, []byte(s.String())}
+	return func(cacheKey CacheKey, req ReliableReq, ok bool) {
+		if !ok {
+			if c.dup(cacheKey.UUID, cacheKey.Block) {
 				return
 			}
-			if err := l.Unmarshal(*r.ReqBody.(*ReqData)); err != nil {
-				log.Printf("long text unmarshal failed: %v", err)
-			}
-			cached = &r
-			s.Write([]byte(l.Text))
-		case <-timer:
-			log.Printf("receive long text %v timeout, discarding partial data", cacheKey)
+			c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, r.SignBody}, l.CreatedAt, []byte(s.String())}
 			return
 		}
+		if err := l.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {
+			log.Printf("long text unmarshal failed: %v", err)
+			return
+		}
+		r = &req
+		s.Write([]byte(l.Text))
 	}
 }
 

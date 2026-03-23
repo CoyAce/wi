@@ -233,16 +233,6 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 		if publisher, ok := s.findSignByFileId(fileId); ok {
 			s.directRelay(publisher, pkt)
 		}
-	case OpPull:
-		var pr PullReq
-		if pr.Unmarshal(pkt) != nil {
-			return
-		}
-		s.ack(addr, pr.Block)
-		if s.dup(addr.String(), pr.Block) {
-			return
-		}
-		s.push(pr, addr)
 	case OpDiscovery:
 		var drq DiscoveryReq
 		if drq.Unmarshal(pkt) != nil {
@@ -265,7 +255,7 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			log.Printf("no peer found for sack, %v", addr.String())
 		}
 	case OpReq:
-		req := ReliableReq{ReqBody: new(LongTextMessage)}
+		req := ReliableReq{ReqBody: &ReqData{}}
 		if req.Unmarshal(pkt) != nil {
 			return
 		}
@@ -273,7 +263,14 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 			if p.(Peer).Contains(MonoRange(req.ReqID)) {
 				return
 			}
-			p.(Peer).receive(addr, req, s.newReqHandler(p.(Peer), addr, req))
+			opCode := req.ReqBody.(*ReqData).Code()
+			if opCode == OpLongText {
+				p.(Peer).receive(addr, req, p.(Peer).processWith(s.newLongTextHandler(addr)))
+			} else if opCode == OpPull {
+				p.(Peer).receive(addr, req, p.(Peer).processWith(s.newPullReqHandler(addr)))
+			} else {
+				p.(Peer).receive(addr, req, p.(Peer).processWith(nil))
+			}
 		} else {
 			log.Printf("no peer found for req, %v", addr.String())
 		}
@@ -379,49 +376,48 @@ func (s *Server) relay(pkt []byte, addr net.Addr) {
 	}
 }
 
-func (s *Server) newReqHandler(p Peer, addr net.Addr, req ReliableReq) func(cacheKey CacheKey) {
-	return func(cacheKey CacheKey) {
-		defer p.deleteRET(cacheKey)
-		retChan := p.loadOrStoreRET(cacheKey)
-
-		// Pre-allocate with reasonable capacity
-		reqs := make([]ReliableReq, 0, 16)
-
-		// Create timer once and reuse
-		timer := time.NewTimer(10 * time.Second)
-		defer timer.Stop()
-
-		for {
-			// Reset timer for this iteration
-			timer.Reset(10 * time.Second)
-
-			select {
-			case r, ok := <-retChan:
-				if !ok {
-					if s.dup(addr.String(), cacheKey.Block) {
-						log.Printf("[Req] %v detected as duplicate", cacheKey)
-						return
-					}
-
-					reqSet := new(ReqSet(reqs))
-					if packets, err := reqSet.ToPackets(); err != nil {
-						log.Printf("req set to packets failed: %v", err)
-					} else {
-						s.ackedMultiRelay(&req.SignBody, packets, cacheKey)
-					}
-
-					if buf, err := reqSet.Marshal(); err != nil {
-						log.Printf("req set marshal failed: %v", err)
-					} else {
-						s.cache(&req.SignBody, cacheKey.Block, buf)
-					}
-					return
-				}
-				reqs = append(reqs, r)
-
-			case <-timer.C:
-				log.Printf("[Req] %v timeout, discarding collected requests", cacheKey)
+func (s *Server) newPullReqHandler(addr net.Addr) func(cacheKey CacheKey, req ReliableReq, ok bool) {
+	return func(cacheKey CacheKey, req ReliableReq, ok bool) {
+		if ok {
+			if s.dup(addr.String(), cacheKey.Block) {
+				log.Printf("[Req] %v detected as duplicate", cacheKey)
 				return
+			}
+			var pr PullReq
+			if err := pr.Unmarshal(*req.ReqBody.(*ReqData)); err != nil {
+				log.Printf("pull req unmarshal failed: %v", err)
+				return
+			}
+			go s.push(&req.SignBody, pr, addr)
+		}
+	}
+}
+
+func (s *Server) newLongTextHandler(addr net.Addr) func(cacheKey CacheKey, req ReliableReq, ok bool) {
+	reqs := make([]ReliableReq, 0, 16)
+	return func(cacheKey CacheKey, req ReliableReq, ok bool) {
+		if ok {
+			reqs = append(reqs, req)
+		} else {
+			if s.dup(addr.String(), cacheKey.Block) {
+				log.Printf("[Req] %v detected as duplicate", cacheKey)
+				return
+			}
+			if len(reqs) == 0 {
+				return
+			}
+
+			reqSet := new(ReqSet(reqs))
+			if packets, err := reqSet.ToPackets(); err != nil {
+				log.Printf("req set to packets failed: %v", err)
+			} else {
+				s.ackedMultiRelay(&reqs[0].SignBody, packets, cacheKey)
+			}
+
+			if buf, err := reqSet.Marshal(); err != nil {
+				log.Printf("req set marshal failed: %v", err)
+			} else {
+				s.cache(&reqs[0].SignBody, cacheKey.Block, buf)
 			}
 		}
 	}
@@ -495,40 +491,40 @@ func (s *Server) collectActiveUsers(sign string) []string {
 	return uuids
 }
 
-func (s *Server) push(pr PullReq, addr net.Addr) {
-	h := s.loadHistory(&pr.SignBody)
+func (s *Server) push(signBody *SignBody, pr PullReq, addr net.Addr) {
+	h := s.loadHistory(signBody)
 	if pr.end == math.MaxUint32 {
-		s.reply(pr, addr, h.Get())
-		s.pushRange(pr, addr, h, Range{pr.start, h.nextBlock()})
+		s.reply(signBody, addr, h.Get())
+		s.pushRange(signBody, addr, h, Range{pr.start, h.nextBlock()})
 		return
 	}
 	ranges := h.Select(pr.Range)
-	s.reply(pr, addr, ranges)
+	s.reply(signBody, addr, ranges)
 	t := RangeTracker{ranges: pr.ranges, latestBlock: pr.end}
 	t.Exclude(ranges)
 	for _, r := range t.ranges {
-		s.pushRange(pr, addr, h, r)
+		s.pushRange(signBody, addr, h, r)
 	}
 }
 
-func (s *Server) reply(pr PullReq, addr net.Addr, ranges []Range) {
+func (s *Server) reply(singBody *SignBody, addr net.Addr, ranges []Range) {
 	var (
 		p        []byte
 		err      error
-		baseSize = 9 + len(pr.UUID) + len(pr.Sign)
+		baseSize = 9 + len(singBody.UUID) + len(singBody.Sign)
 		maxLen   = (DatagramSize - baseSize) / 8
 		req      ReplyReq
 	)
 	for _, r := range partition(ranges, maxLen) {
-		req = ReplyReq{Block: s.nextID(), SignBody: pr.SignBody, ranges: r}
+		req = ReplyReq{Block: s.nextID(), SignBody: *singBody, ranges: r}
 		if p, err = req.Marshal(); err != nil {
-			log.Printf("pull req [%s]: %v", pr.UUID, err)
+			log.Printf("reply req marshal failed [%s]: %v", singBody.UUID, err)
 		}
 		s.dispatch(addr, p, _SERVER, req.Block)
 	}
 }
 
-func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
+func (s *Server) pushRange(signBody *SignBody, addr net.Addr, h *history, r Range) {
 	for i := r.start; i <= r.end; i++ {
 		p, ok := h.Load(i)
 		if !ok {
@@ -536,9 +532,9 @@ func (s *Server) pushRange(pr PullReq, addr net.Addr, h *history, r Range) {
 		}
 		data := p.([]byte)
 		if toOpCode(data[:2]) == OpReq {
-			s.dispatchInOrder(addr, ToPackets(data), newCacheKey(pr.UUID, i))
+			s.dispatchInOrder(addr, ToPackets(data), newCacheKey(signBody.UUID, i))
 		} else {
-			s.dispatch(addr, data, pr.UUID, i)
+			s.dispatch(addr, data, signBody.UUID, i)
 		}
 	}
 }

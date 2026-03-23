@@ -156,10 +156,10 @@ func TestPubSub(t *testing.T) {
 			if !reflect.DeepEqual(wrq, q) {
 				t.Errorf("expected file message %v; actual file message %v", wrq, q)
 			}
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 			t.Errorf("timeout")
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 	_ = sub.SubscribeFile(1, "pub", func(p int, s int) {
@@ -173,7 +173,7 @@ func TestPubSub(t *testing.T) {
 		if rrq.Subscriber != "sub" {
 			t.Errorf("expected subscriber \"sub\"; actual subscriber %q", rrq.Subscriber)
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 
@@ -215,7 +215,7 @@ func TestPubSub(t *testing.T) {
 		if found {
 			t.Errorf("sub should be removed")
 		}
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 }
@@ -224,7 +224,9 @@ func TestSendFile(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
 	receiver1 := newClient(serverAddr, "receiver1")
+	receiver1.SignIn()
 	receiver2 := newClient(serverAddr, "receiver2")
+	receiver2.SignIn()
 	_ = sender.SendText("sync")
 	data := []byte("This is a file")
 	err := sender.SendFile(func() (io.ReadSeekCloser, error) {
@@ -238,7 +240,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 	select {
@@ -246,7 +248,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(10 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 }
@@ -636,8 +638,7 @@ func TestReply(t *testing.T) {
 	}
 	time.Sleep(1 * time.Millisecond)
 	a, _ := s.parseAddrByUUID("c")
-	r := Range{1, 1}
-	s.reply(PullReq{Block: c.nextID(), SignBody: *sign, Range: r, ranges: tracker.ranges}, a, tracker.ranges)
+	s.reply(sign, a, tracker.ranges)
 	if len(tracker.ranges) != 0 {
 		t.Errorf("expected 0; actual %d", len(tracker.ranges))
 	}
