@@ -197,30 +197,35 @@ func (r *RangeTracker) Set(ranges []Range) {
 func (r *RangeTracker) Merge(x *RangeTracker) {
 	x.Exclude(r.Get())
 
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	for _, rng := range x.Get() {
 		r.add(rng)
 	}
 }
 
 func (r *RangeTracker) Exclude(ranges []Range) {
+	r.rwLock.Lock()
+	defer r.rwLock.Unlock()
 	for _, rng := range ranges {
 		r.remove(rng)
 	}
 }
 
 func (r *RangeTracker) Track(rg Range) {
-	if rg.start < r.nextBlock() {
-		// 考虑补帧
-		r.remove(rg)
-		if rg.end < r.nextBlock() {
-			return
-		}
-	} else if rg.start > r.nextBlock() {
-		// 考虑丢帧
-		r.add(Range{r.nextBlock(), rg.start - 1})
-	}
 	r.rwLock.Lock()
 	defer r.rwLock.Unlock()
+	nextBlock := r.latestBlock + 1
+	if rg.start < nextBlock {
+		// 考虑补帧
+		r.remove(rg)
+		if rg.end < nextBlock {
+			return
+		}
+	} else if rg.start > nextBlock {
+		// 考虑丢帧
+		r.add(Range{nextBlock, rg.start - 1})
+	}
 	r.latestBlock = rg.end
 }
 
@@ -280,8 +285,6 @@ func (r *RangeTracker) Select(x Range) []Range {
 }
 
 func (r *RangeTracker) remove(rg Range) {
-	r.rwLock.Lock()
-	defer r.rwLock.Unlock()
 	if len(r.ranges) == 0 {
 		return
 	}
@@ -304,8 +307,6 @@ func (r *RangeTracker) remove(rg Range) {
 }
 
 func (r *RangeTracker) add(rg Range) {
-	r.rwLock.Lock()
-	defer r.rwLock.Unlock()
 	r.ranges = append(r.ranges, rg)
 }
 
