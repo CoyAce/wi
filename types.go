@@ -655,7 +655,7 @@ func (n *CtrlReq) Unmarshal(p []byte) error {
 type ReqHeader struct {
 	Block uint32
 	ReqID uint32
-	UUID  string
+	SignBody
 }
 
 func (s *ReqHeader) Marshal(b *bytes.Buffer) error {
@@ -669,7 +669,7 @@ func (s *ReqHeader) Marshal(b *bytes.Buffer) error {
 		return err
 	}
 
-	err = writeString(b, s.UUID) // write uuid
+	err = s.SignBody.Marshal(b) // write sign body
 	if err != nil {
 		return err
 	}
@@ -688,7 +688,7 @@ func (s *ReqHeader) Unmarshal(b *bytes.Buffer) error {
 		return InvalidData
 	}
 
-	s.UUID, err = readString(b) // read uuid
+	err = s.SignBody.Unmarshal(b) // read sign body
 	if err != nil {
 		return InvalidData
 	}
@@ -1312,7 +1312,7 @@ type ReliableReq struct {
 }
 
 func (r *ReliableReq) HeaderSize() int {
-	return 2 + 4 + 4 + len(r.UUID) + 1 + 1 // +1 for IsFinal flag
+	return 2 + 4 + 4 + len(r.UUID) + 1 + len(r.Sign) + 1 + 1 // +1 for IsFinal flag
 }
 
 func (r *ReliableReq) Marshal() ([]byte, error) {
@@ -1456,12 +1456,11 @@ func (d *DiscoveryReq) Unmarshal(p []byte) error {
 
 type LongTextMessage struct {
 	CreatedAt int64
-	Sign      string
 	Text      string
 }
 
 func (l *LongTextMessage) Marshal() ([]byte, error) {
-	size := 2 + 8 + len(l.Sign) + 1 + len(l.Text) + 1
+	size := 2 + 8 + len(l.Text) + 1
 	if size > DatagramSize {
 		return nil, errors.New("text is too long")
 	}
@@ -1473,11 +1472,6 @@ func (l *LongTextMessage) Marshal() ([]byte, error) {
 	}
 
 	err = binary.Write(b, binary.BigEndian, l.CreatedAt) // write created at
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeString(b, l.Sign) // write sign
 	if err != nil {
 		return nil, err
 	}
@@ -1504,11 +1498,6 @@ func (l *LongTextMessage) Unmarshal(p []byte) error {
 	}
 
 	err = binary.Read(r, binary.BigEndian, &l.CreatedAt) // read created at
-	if err != nil {
-		return InvalidData
-	}
-
-	l.Sign, err = readString(r) // read sign
 	if err != nil {
 		return InvalidData
 	}

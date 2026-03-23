@@ -403,25 +403,17 @@ func (s *Server) newReqHandler(p Peer, addr net.Addr, req ReliableReq) func(cach
 						return
 					}
 
-					// Safe type assertion
-					longText, ok := req.ReqBody.(*LongTextMessage)
-					if !ok {
-						log.Printf("[Req] invalid ReqBody type: expected *LongTextMessage, got %T", req.ReqBody)
-						return
-					}
-
-					signBody := &SignBody{Sign: longText.Sign, UUID: req.UUID}
 					reqSet := new(ReqSet(reqs))
 					if packets, err := reqSet.ToPackets(); err != nil {
 						log.Printf("req set to packets failed: %v", err)
 					} else {
-						s.ackedMultiRelay(signBody, packets, cacheKey)
+						s.ackedMultiRelay(&req.SignBody, packets, cacheKey)
 					}
 
 					if buf, err := reqSet.Marshal(); err != nil {
 						log.Printf("req set marshal failed: %v", err)
 					} else {
-						s.cache(signBody, cacheKey.Block, buf)
+						s.cache(&req.SignBody, cacheKey.Block, buf)
 					}
 					return
 				}
@@ -438,11 +430,11 @@ func (s *Server) newReqHandler(p Peer, addr net.Addr, req ReliableReq) func(cach
 func (s *Server) sendUsers(drq DiscoveryReq, addr net.Addr) {
 	users := s.collectUsers(drq.Sign, drq.DiscoveryFlag)
 	if v, ok := s.addrToPeer.Load(addr.String()); ok {
-		headerSize := 12 + len(v.(Peer).UUID)
+		headerSize := 13 + len(v.(Peer).UUID)
 		resp := s.toDiscoveryResp(users, headerSize)
 		reqs := make([]ReliableReq, 0, len(resp))
 		for i, d := range resp {
-			reqs = append(reqs, ReliableReq{ReqHeader: ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, UUID: v.(Peer).UUID}, ReqBody: &d})
+			reqs = append(reqs, ReliableReq{ReqHeader: ReqHeader{Block: uint32(i + 1), ReqID: drq.Block, SignBody: SignBody{UUID: v.(Peer).UUID}}, ReqBody: &d})
 		}
 		reqs[len(reqs)-1].IsFinal = true
 		if packets, err := new(ReqSet(reqs)).ToPackets(); err != nil {

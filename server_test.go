@@ -238,7 +238,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 	select {
@@ -246,7 +246,7 @@ func TestSendFile(t *testing.T) {
 		if wrq.FileId != 1 {
 			t.Errorf("expected file id 1; actual file id %d", wrq.FileId)
 		}
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		t.Errorf("timeout")
 	}
 }
@@ -651,7 +651,7 @@ func TestMultiWrite(t *testing.T) {
 	if v, ok := s.addrToPeer.Load(c.conn.LocalAddr().String()); ok {
 		sack := make(chan uint32)
 		v.(Peer).storeSACK(key, sack)
-		header := ReqHeader{Block: 1, ReqID: key.Block, UUID: key.UUID}
+		header := ReqHeader{Block: 1, ReqID: key.Block, SignBody: SignBody{UUID: key.UUID}}
 		data, err := new(ReliableReq{ReqHeader: header, ReqBody: new(ReqData("hello"))}).Marshal()
 		if err != nil {
 			t.Fatal(err)

@@ -572,7 +572,9 @@ func (w *reliableWriter) reliableMultiWrite(
 		ReqHeader{
 			Block: finBlock,
 			ReqID: cacheKey.Block,
-			UUID:  cacheKey.UUID,
+			SignBody: SignBody{
+				UUID: cacheKey.UUID,
+			},
 		},
 	}
 	finPkt, err := fin.Marshal()
@@ -804,7 +806,9 @@ func (w *reliableWriter) sack(addr net.Addr, uuid string, reqID uint32, block ui
 		ReqHeader{
 			Block: block,
 			ReqID: reqID,
-			UUID:  uuid,
+			SignBody: SignBody{
+				UUID: uuid,
+			},
 		},
 	}
 

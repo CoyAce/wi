@@ -728,9 +728,9 @@ func (c *Client) SendText(text string) error {
 }
 
 func (c *Client) sendLongText(text string) error {
-	headerSize := 12 + len(c.ID()) + 12 + len(c.Sign)
+	headerSize := 2 + 4 + 4 + 2 + 1 + len(c.ID()) + len(c.Sign) + 2 + 8 + 1
 	reqID := c.nextID()
-	longTexts := c.toLongTextReqs(reqID, text, headerSize, c.Sign)
+	longTexts := c.toLongTextReqs(reqID, text, headerSize)
 	if packets, err := new(ReqSet(longTexts)).ToPackets(); err != nil {
 		return err
 	} else {
@@ -738,18 +738,19 @@ func (c *Client) sendLongText(text string) error {
 	}
 }
 
-func (c *Client) toLongTextReqs(reqID uint32, text string, headerSize int, sign string) []ReliableReq {
+func (c *Client) toLongTextReqs(reqID uint32, text string, headerSize int) []ReliableReq {
 	createdAt := time.Now()
 	maxSize := DatagramSize - headerSize
-	ret := make([]ReliableReq, 0, 20)
+	ret := make([]ReliableReq, 0, 16)
+	signBody := SignBody{Sign: c.Sign, UUID: c.ID()}
 
 	for i, cnt := 0, 1; i < len(text); i, cnt = i+maxSize, cnt+1 {
-		header := ReqHeader{uint32(cnt), reqID, c.ID()}
+		header := ReqHeader{uint32(cnt), reqID, signBody}
 		isFinal := i+maxSize >= len(text) // Last packet
 		if isFinal {
-			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i:]}, true})
+			ret = append(ret, ReliableReq{header, &LongTextMessage{CreatedAt: createdAt.UnixMilli(), Text: text[i:]}, true})
 		} else {
-			ret = append(ret, ReliableReq{header, &LongTextMessage{Sign: sign, CreatedAt: createdAt.UnixMilli(), Text: text[i : i+maxSize]}, false})
+			ret = append(ret, ReliableReq{header, &LongTextMessage{CreatedAt: createdAt.UnixMilli(), Text: text[i : i+maxSize]}, false})
 		}
 	}
 	return ret
@@ -1151,7 +1152,10 @@ func (c *Client) handle(buf []byte, addr net.Addr) {
 // assembleLongText assembles long text message from fragments with timeout protection.
 func (c *Client) assembleLongText(cacheKey CacheKey) {
 	defer c.deleteRET(cacheKey)
-	var l LongTextMessage
+	var (
+		l      LongTextMessage
+		cached *ReliableReq
+	)
 	retChan := c.loadOrStoreRET(cacheKey)
 	s := strings.Builder{}
 	for {
@@ -1162,12 +1166,13 @@ func (c *Client) assembleLongText(cacheKey CacheKey) {
 				if c.dup(cacheKey.UUID, cacheKey.Block) {
 					return
 				}
-				c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, SignBody{l.Sign, cacheKey.UUID}}, l.CreatedAt, []byte(s.String())}
+				c.SignedMessages <- SignedMessage{SignReq{cacheKey.Block, cached.SignBody}, l.CreatedAt, []byte(s.String())}
 				return
 			}
 			if err := l.Unmarshal(*r.ReqBody.(*ReqData)); err != nil {
 				log.Printf("long text unmarshal failed: %v", err)
 			}
+			cached = &r
 			s.Write([]byte(l.Text))
 		case <-timer:
 			log.Printf("receive long text %v timeout, discarding partial data", cacheKey)
