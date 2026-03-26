@@ -34,16 +34,20 @@ type updater struct {
 }
 
 type fileWriter struct {
-	wrq          chan WriteReq       // file request
-	fileData     chan Data           // file data
-	dataDir      string              // files save in dataDir
-	fileMessages chan<- WriteReq     // notify file complete, receiver could refresh icon or update status
-	files        map[uint32]*file    // internal file info
-	updaters     map[uint32]*updater // metrics updater
-	nck          func(f file)        // request lost packet
+	wrq          chan WriteReq          // file request
+	fileData     chan Data              // file data
+	dataDir      string                 // files save in dataDir
+	fileMessages chan<- WriteReq        // notify file complete, receiver could refresh icon or update status
+	files        map[uint32]*file       // internal file info
+	updaters     map[uint32]*updater    // metrics updater
+	nck          func(f file)           // request lost packet
+	isActive     func(uuid string) bool // check if user is active
 }
 
 func (f *fileWriter) loop() {
+	pullTicker := time.NewTicker(2 * time.Second)
+	defer pullTicker.Stop()
+
 	for {
 		select {
 		case req := <-f.wrq:
@@ -66,6 +70,8 @@ func (f *fileWriter) loop() {
 				continue
 			}
 			f.tryWrite(data)
+		case <-pullTicker.C:
+			f.tryPullTimeoutFiles()
 		}
 	}
 }
@@ -199,6 +205,14 @@ func (f *fileWriter) isFile(fileId uint32) bool {
 func (f *fileWriter) dup(fileId uint32, block uint32) bool {
 	fd := f.files[fileId]
 	return fd != nil && fd.Contains(MonoRange(block))
+}
+
+func (f *fileWriter) tryPullTimeoutFiles() {
+	for _, v := range f.files {
+		if f.isActive(v.req.UUID) && time.Since(v.updateAt) > 2*time.Second {
+			f.tryComplete(v.req.FileId)
+		}
+	}
 }
 
 func writeTo(filePath string, data []Data) {
@@ -489,6 +503,7 @@ type fileManager struct {
 func newFileMetaInfo(
 	externalDir string,
 	nck func(f file),
+	isActive func(uuid string) bool,
 	opReady func(id uint32) error,
 	opCancel func(id uint32) error,
 	writeOnce func(d Data) error,
@@ -510,6 +525,7 @@ func newFileMetaInfo(
 			files:        make(map[uint32]*file),
 			updaters:     make(map[uint32]*updater),
 			nck:          nck,
+			isActive:     isActive,
 		},
 	}
 }
@@ -809,7 +825,6 @@ func (c *Client) Pull() {
 		return
 	}
 	defer c.pullState.Store(0)
-	c.pullTimeoutFiles()
 	wg := new(sync.WaitGroup)
 	hs := c.loadHistorySet(c.Sign)
 	if activeUsers, err := c.Discover(Active); err != nil {
@@ -896,15 +911,10 @@ func (c *Client) ListenAndServe(addr string) {
 		discoverTicker := time.NewTicker(30 * time.Second)
 		defer discoverTicker.Stop()
 
-		pullTicker := time.NewTicker(2 * time.Second)
-		defer pullTicker.Stop()
-
 		for {
 			select {
 			case <-discoverTicker.C:
 				go c.discoverOnlineUsers()
-			case <-pullTicker.C:
-				go c.pullTimeoutFiles()
 			}
 		}
 	}()
@@ -927,14 +937,6 @@ func (c *Client) discoverOnlineUsers() {
 	}
 }
 
-func (c *Client) pullTimeoutFiles() {
-	for _, v := range c.files {
-		if c.IsActive(v.req.UUID) && time.Since(v.updateAt) > 2*time.Second {
-			c.tryComplete(v.req.FileId)
-		}
-	}
-}
-
 func (c *Client) init() {
 	c.retries = 18
 	c.minRTT = 3 * time.Second
@@ -942,7 +944,7 @@ func (c *Client) init() {
 	c.blockManager = newBlockManager()
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.opReady, c.opCancel, c.writeOnce, c.FileMessages)
+	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.IsActive, c.opReady, c.opCancel, c.writeOnce, c.FileMessages)
 }
 
 // SendSign try to write sign to server

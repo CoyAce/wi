@@ -224,10 +224,7 @@ func TestSendFile(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
 	receiver1 := newClient(serverAddr, "receiver1")
-	receiver1.SignIn()
 	receiver2 := newClient(serverAddr, "receiver2")
-	receiver2.SignIn()
-	_ = sender.SendText("sync")
 	data := []byte("This is a file")
 	err := sender.SendFile(func() (io.ReadSeekCloser, error) {
 		return BytesToReadSeekCloser(data), nil
@@ -256,7 +253,6 @@ func TestSendFile(t *testing.T) {
 func TestClientDupMessage(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
-	receiver.SignIn()
 	client, err := setUpClient(t)
 	defer func() { _ = client.Close() }()
 
@@ -330,7 +326,6 @@ func TestServerDupMessage(t *testing.T) {
 func TestDupMessage(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
-	receiver.SignIn()
 	sender := newClient(serverAddr, "sender")
 	go func() {
 		_ = sender.SendText("hello")
@@ -387,7 +382,6 @@ func TestUnknownUser(t *testing.T) {
 func TestSignOut(t *testing.T) {
 	server, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
-	sender.SignIn()
 	time.Sleep(1 * time.Millisecond)
 	_, err := server.parseAddrByUUID(sender.ID())
 	if err != nil {
@@ -411,7 +405,6 @@ func TestSyncName(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
 	sender := newClient(serverAddr, "sender")
-	receiver.SignIn()
 	OldUUID := sender.ID()
 	sender.SetNickName("#")
 	sender.SignIn()
@@ -474,10 +467,8 @@ func TestReadIcon(t *testing.T) {
 func TestPullLongText(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
-	sender.SignIn()
 	_ = sender.SendText(LongText)
 	receiver := newClient(serverAddr, "receiver")
-	receiver.SignIn()
 	time.Sleep(1 * time.Millisecond)
 	receiver.Pull()
 	select {
@@ -493,12 +484,10 @@ func TestPullLongText(t *testing.T) {
 func TestPull(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
-	sender.SignIn()
 	_ = sender.SendText("hello")
 	_ = sender.SendText("world")
 	_ = sender.PublishFile("test.txt", 5, 1)
 	receiver := newClient(serverAddr, "receiver")
-	receiver.SignIn()
 	time.Sleep(1 * time.Millisecond)
 	receiver.Pull()
 	select {
@@ -545,7 +534,6 @@ func TestCheck(t *testing.T) {
 	}
 	s, serverAddr := setUpServer(t)
 	receiver := newClient(serverAddr, "receiver")
-	receiver.SignIn()
 	_, err = s.conn.WriteTo(pkt, receiver.conn.LocalAddr())
 	if err != nil {
 		t.Fatal(err)
@@ -630,7 +618,6 @@ func TestReply(t *testing.T) {
 	c := newClient(serverAddr, "c")
 	sign := &SignBody{Sign: "default", UUID: "sender"}
 	c.Track(sign, 2)
-	c.SignIn()
 	tracker := c.loadRangeTracker(sign)
 	expected := []Range{{1, 1}}
 	if !reflect.DeepEqual(tracker.ranges, expected) {
@@ -647,7 +634,6 @@ func TestReply(t *testing.T) {
 func TestMultiWrite(t *testing.T) {
 	s, serverAddr := setUpServer(t)
 	c := newClient(serverAddr, "c")
-	c.SignIn()
 	key := newCacheKey(c.ID(), 1)
 	if v, ok := s.addrToPeer.Load(c.conn.LocalAddr().String()); ok {
 		sack := make(chan uint32)
@@ -671,11 +657,8 @@ func TestMultiWrite(t *testing.T) {
 func TestLongText(t *testing.T) {
 	_, serverAddr := setUpServer(t)
 	sender := newClient(serverAddr, "sender")
-	sender.SignIn()
 	receiver1 := newClient(serverAddr, "receiver1")
-	receiver1.SignIn()
 	receiver2 := newClient(serverAddr, "receiver2")
-	receiver2.SignIn()
 	err := sender.SendText(LongText)
 	if err != nil {
 		t.Error(err)
@@ -708,6 +691,7 @@ func newClient(serverAddr string, UUID string) *Client {
 		client.ListenAndServe("127.0.0.1:")
 	}()
 	client.Ready()
+	client.SignIn()
 	return &client
 }
 
