@@ -34,14 +34,14 @@ type updater struct {
 }
 
 type fileWriter struct {
-	wrq          chan WriteReq          // file request
-	fileData     chan Data              // file data
-	dataDir      string                 // files save in dataDir
-	fileMessages chan<- WriteReq        // notify file complete, receiver could refresh icon or update status
-	files        map[uint32]*file       // internal file info
-	updaters     map[uint32]*updater    // metrics updater
-	nck          func(f file)           // request lost packet
-	isActive     func(uuid string) bool // check if user is active
+	wrq          chan WriteReq                       // file request
+	fileData     chan Data                           // file data
+	dataDir      string                              // files save in dataDir
+	fileMessages chan<- WriteReq                     // notify file complete, receiver could refresh icon or update status
+	files        map[uint32]*file                    // internal file info
+	updaters     map[uint32]*updater                 // metrics updater
+	nck          func(fileId uint32, ranges []Range) // request lost packet
+	isActive     func(uuid string) bool              // check if user is active
 }
 
 func (f *fileWriter) loop() {
@@ -51,18 +51,24 @@ func (f *fileWriter) loop() {
 	for {
 		select {
 		case req := <-f.wrq:
-			if req.Code == OpCancel {
+			switch req.Code {
+			case OpCancel:
 				log.Printf("OpCancel received, file %d not exist", req.FileId)
 				if c, ok := f.files[req.FileId]; ok && c.req.UUID == req.UUID {
 					f.clean(req.FileId)
 				}
-			} else if req.Code == OpReady {
-				log.Printf("OpReady received, try complete")
+			case OpReady:
 				if !f.isFile(req.FileId) {
 					continue
 				}
-				f.tryComplete(req.FileId)
-			} else {
+				if req.Size == 0 {
+					log.Printf("OpReady received, try complete")
+					f.tryComplete(req.FileId)
+				} else {
+					log.Printf("OpReady received, try nck")
+					f.tryNCK(req)
+				}
+			default:
 				f.init(req)
 			}
 		case data := <-f.fileData:
@@ -73,6 +79,16 @@ func (f *fileWriter) loop() {
 		case <-pullTicker.C:
 			f.tryPullTimeoutFiles()
 		}
+	}
+}
+
+func (f *fileWriter) tryNCK(req WriteReq) {
+	block := uint32(req.Size / BlockSize)
+	rng := Range{start: block - CheckPoint, end: block}
+	fd := f.files[req.FileId]
+	missingPackets := fd.Select(rng)
+	if len(missingPackets) > 0 {
+		go f.nck(req.FileId, missingPackets)
 	}
 }
 
@@ -142,7 +158,7 @@ func (f *fileWriter) init(req WriteReq) {
 		updater:      f.updaters[req.FileId],
 	}
 	f.files[req.FileId] = fd
-	go f.nck(*fd)
+	go f.nck(fd.req.FileId, fd.Get())
 }
 
 func (f *fileWriter) newRangeTracker(size uint64) *RangeTracker {
@@ -179,7 +195,7 @@ func (f *fileWriter) tryComplete(id uint32) {
 		f.clean(id)
 		f.fileMessages <- req
 	} else {
-		go f.nck(*fd)
+		go f.nck(fd.req.FileId, fd.Get())
 		if fd.elapsed1Second() {
 			fd.updateAndReset()
 		}
@@ -294,7 +310,7 @@ func (f *fileContent) unsetProcessing() {
 type fileReader struct {
 	req       chan Nck                // packets request
 	contents  map[uint32]*fileContent // fileId -> *fileContent
-	opReady   func(id uint32) error
+	opReady   func(id uint32, size uint64) error
 	opCancel  func(id uint32) error
 	writeOnce func(data Data) error // send single data packet
 }
@@ -337,6 +353,7 @@ LOOP:
 			if err = f.writeOnce(d); err != nil {
 				log.Printf("Send failed: %v", err)
 			}
+			f.tryOpReady(id, i, rg.start)
 		}
 		c.remove(rg)
 	}
@@ -344,7 +361,18 @@ LOOP:
 		c.swap()
 		goto LOOP
 	}
-	if err = f.opReady(id); err != nil {
+	// use size 0 to mark the end
+	if err = f.opReady(id, 0); err != nil {
+		log.Printf("Ready failed: %v", err)
+	}
+}
+
+func (f *fileReader) tryOpReady(fileId uint32, i uint32, start uint32) {
+	if start != 1 || i == start || (i-start)%CheckPoint != 0 {
+		return
+	}
+	log.Printf("checkpoint: %v", i-start)
+	if err := f.opReady(fileId, uint64(i*BlockSize)); err != nil {
 		log.Printf("Ready failed: %v", err)
 	}
 }
@@ -500,11 +528,11 @@ type fileManager struct {
 	*fileReader
 }
 
-func newFileMetaInfo(
+func newFileManager(
 	externalDir string,
-	nck func(f file),
+	nck func(fileId uint32, ranges []Range),
 	isActive func(uuid string) bool,
-	opReady func(id uint32) error,
+	opReady func(id uint32, size uint64) error,
 	opCancel func(id uint32) error,
 	writeOnce func(d Data) error,
 	fileMessages chan<- WriteReq,
@@ -716,9 +744,9 @@ func (c *Client) SendFile(content func() (io.ReadSeekCloser, error), code OpCode
 	})
 }
 
-func (c *Client) opReady(id uint32) error {
+func (c *Client) opReady(id uint32, size uint64) error {
 	log.Printf("send OpReady")
-	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, UUID: c.ID()})
+	return c.send(&WriteReq{Code: OpReady, Block: c.nextID(), FileId: id, Size: size, UUID: c.ID()})
 }
 
 func (c *Client) opCancel(id uint32) error {
@@ -944,7 +972,7 @@ func (c *Client) init() {
 	c.blockManager = newBlockManager()
 	c.messages = newMessages()
 	c.audioManager = newAudioMetaInfo()
-	c.fileManager = newFileMetaInfo(c.ExternalDir, c.nck, c.IsActive, c.opReady, c.opCancel, c.writeOnce, c.FileMessages)
+	c.fileManager = newFileManager(c.ExternalDir, c.nck, c.IsActive, c.opReady, c.opCancel, c.writeOnce, c.FileMessages)
 }
 
 // SendSign try to write sign to server
@@ -1169,9 +1197,8 @@ func (c *Client) ack(addr net.Addr, UUID string, block uint32) {
 	}
 }
 
-func (c *Client) nck(f file) {
+func (c *Client) nck(fileId uint32, ranges []Range) {
 	const maxRanges = DatagramSize / 8
-	ranges := f.Get()
 	n := len(ranges)
 	if n == 0 {
 		return
@@ -1181,7 +1208,7 @@ func (c *Client) nck(f file) {
 	if k := rand.Intn(n); n >= maxRanges && k > 0 && k < n {
 		ranges = append(ranges[k:], ranges[:k]...)
 	}
-	nck := Nck{Block: c.nextID(), FileId: f.req.FileId, UUID: c.ID(), ranges: ranges}
+	nck := Nck{Block: c.nextID(), FileId: fileId, UUID: c.ID(), ranges: ranges}
 	if err := c.send(&nck); err != nil {
 		log.Printf("nck failed: %v", err)
 	}
@@ -1207,6 +1234,7 @@ var (
 )
 
 const (
-	_SERVER  = ""
-	_TIMEOUT = 2 * time.Second
+	_SERVER    = ""
+	_TIMEOUT   = 2 * time.Second
+	CheckPoint = 2 * 1024 * 1024 / BlockSize
 )
